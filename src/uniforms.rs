@@ -1,19 +1,33 @@
 use bytemuck::{Pod, Zeroable};
 
+#[allow(dead_code)]
 #[rustfmt::skip]
-const OPENGL_TO_WGPU: na::Matrix4<f64> = na::Matrix4::new(
+pub const OPENGL_TO_WGPU: na::Matrix4<f32> = na::Matrix4::new(
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 0.5, 0.0,
     0.0, 0.0, 0.5, 1.0,
 );
 
+pub const VERTICES: &[Vertex] = &[
+    Vertex { position: na::Vector3::new(0.0, 0.5, 0.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
+    Vertex { position: na::Vector3::new(-0.5, -0.5, 0.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
+    Vertex { position: na::Vector3::new(0.5, -0.5, 0.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+];
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
+pub struct Vertex {
+    position: na::Vector3<f32>,
+    color: na::Vector3<f32>
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct CameraUniform {
-    view: na::Matrix4<f64>,
-    proj: na::Matrix4<f64>,
-    model: na::Matrix4<f64>,
+    view: na::Matrix4<f32>,
+    proj: na::Matrix4<f32>,
+    model: na::Vector3<f32>,
 }
 
 impl CameraUniform {
@@ -23,7 +37,7 @@ impl CameraUniform {
         // looking at point 1.0, 0.0, 0.0
         let target = na::Point3::new(1.0, 0.0, 0.0);
 
-        let proj = na::Perspective3::new(45.0, width as f64 / height as f64, 10.0, 400.0);
+        let proj = na::Perspective3::new(45.0, width as f32 / height as f32, 10.0, 400.0);
         let view = na::Isometry3::look_at_rh(&eye, &target, &na::Vector3::y());
         let model = na::Isometry3::new(na::Vector3::x(), na::zero());
 

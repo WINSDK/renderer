@@ -5,8 +5,9 @@ compile_error!("Renderer can only be build for windows, macos and linux.");
 
 mod uniforms;
 pub use uniforms::*;
-
 mod window;
+pub use window::*;
+mod events;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,5 +18,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     let _window = window::Window::new().await;
 
-    Ok(())
+    loop {}
 }

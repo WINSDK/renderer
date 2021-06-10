@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-use std::mem::size_of;
+use std::{borrow::Cow, fmt::Debug, fs, mem::size_of, path::Path};
 use wgpu::*;
 use winit::{
+    dpi::PhysicalSize,
     event_loop::EventLoop,
     window::{Icon, Window as WindowHandle, WindowBuilder},
 };
@@ -32,10 +33,107 @@ fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) 
         .unwrap()
 }
 
+#[cfg(all(feature = "naga", not(feature = "shaderc")))]
+fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
+    path: P,
+    stage: ShaderStage,
+    flags: ShaderFlags,
+    device: &Device,
+) -> ShaderModule {
+    use naga::{
+        back::spv,
+        front::glsl,
+        valid::{ValidationFlags, Validator},
+    };
+
+    let cache_path = path.as_ref().with_extension("spv");
+    let cache_path = cache_path.file_name().unwrap();
+    let cache_path = Path::new("/tmp").join(cache_path);
+
+    log::info!("reading shader from: {:?}", path);
+
+    let src = fs::read_to_string(path.as_ref()).unwrap();
+    let module = {
+        let mut entry_points = naga::FastHashMap::default();
+        entry_points.insert("main".to_string(), naga::ShaderStage::Vertex);
+        glsl::parse_str(
+            &src,
+            &glsl::Options {
+                entry_points,
+                defines: Default::default(),
+            },
+        )
+        .unwrap()
+    };
+
+    let analysis = if cfg!(debug_assertions) {
+        Validator::new(ValidationFlags::all())
+            .validate(&module)
+            .unwrap()
+    } else {
+        Validator::new(ValidationFlags::empty())
+            .validate(&module)
+            .unwrap()
+    };
+
+    let spv = spv::write_vec(&module, &analysis, &spv::Options::default()).unwrap();
+    let binary = spv
+        .iter()
+        .fold(Vec::with_capacity(spv.len() * 4), |mut v, w| {
+            v.extend_from_slice(&w.to_le_bytes());
+            v
+        });
+
+    fs::write(cache_path, binary.as_slice()).unwrap();
+    let binary: Vec<u32> = unsafe { std::mem::transmute(binary) };
+
+    // TODO: do a checksum.
+    device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: ShaderSource::SpirV(Cow::from(binary)),
+        flags,
+    })
+}
+
+#[cfg(feature = "shaderc")]
+fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
+    path: P,
+    stage: ShaderStage,
+    flags: ShaderFlags,
+    device: &Device,
+) -> ShaderModule {
+    let cache_path = path.as_ref().with_extension("spv");
+    let cache_path = cache_path.file_name().unwrap();
+    let cache_path = Path::new("/tmp").join(cache_path);
+
+    log::info!("reading shader from: {:?}", path);
+
+    let mut compiler = shaderc::Compiler::new().unwrap();
+    let src = fs::read_to_string(path.as_ref()).unwrap();
+    let binary = compiler
+        .compile_into_spirv(
+            &src,
+            shaderc::ShaderKind::Vertex,
+            cache_path.to_str().unwrap(),
+            "main",
+            None,
+        )
+        .unwrap_or_else(|err| panic!("{}", err));
+
+    fs::write(cache_path, binary.as_binary_u8()).unwrap();
+
+    // TODO: do a checksum.
+    device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: ShaderSource::SpirV(Cow::from(binary.as_binary())),
+        flags,
+    })
+}
+
 struct Display {
-    window: winit::window::Window,
-    size: winit::dpi::PhysicalSize<u32>,
+    window: WindowHandle,
     event_loop: EventLoop<()>,
+    size: PhysicalSize<u32>,
     instance: Instance,
     surface: Surface,
     adapter: Adapter,
@@ -136,6 +234,31 @@ impl Window {
             .device
             .create_swap_chain(&display.surface, &swap_chain_desc);
 
+        log::info!("initializing vertex data..");
+        let vertex_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Camera vertex buffer"),
+            size: 3 * size_of::<crate::Vertex>() as u64,
+            usage: BufferUsage::VERTEX | BufferUsage::COPY_DST,
+            mapped_at_creation: true,
+        });
+
+        display
+            .queue
+            .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(crate::VERTICES));
+
+        log::info!("initializing uniform buffer data..");
+        let uniform_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Camera uniform buffer"),
+            size: size_of::<crate::CameraUniform>() as u64,
+            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            mapped_at_creation: true,
+        });
+
+        let uniform = crate::CameraUniform::new(display.size.width, display.size.height);
+        display
+            .queue
+            .write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
+
         let bind_group_layout =
             display
                 .device
@@ -155,28 +278,6 @@ impl Window {
                     }],
                 });
 
-        let pipeline_layout = display
-            .device
-            .create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some("Pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let uniform_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Camera uniform buffer"),
-            size: size_of::<crate::CameraUniform>() as u64,
-            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            mapped_at_creation: false, // no clue what this does so i'll leave it as false
-        });
-
-        log::info!("initializing uniform buffer data..");
-
-        let uniform = crate::CameraUniform::new(display.size.width, display.size.height);
-        display
-            .queue
-            .write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
-
         let bind_group = display.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Camera Bind Group"),
             layout: &bind_group_layout,
@@ -191,9 +292,20 @@ impl Window {
             flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
         }
 
-        let module = display
+        let module = generate_vulkan_shader_module(
+            "./shaders/cam.glsl",
+            ShaderStage::VERTEX,
+            flags,
+            &display.device,
+        );
+
+        let pipeline_layout = display
             .device
-            .create_shader_module(&include_spirv!("../shaders/cam.glsl"));
+            .create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some("Pipeline layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         // Create the render pipelines. These describe how the data will flow through the GPU, and what
         // constraints and modifiers it will have.
@@ -206,7 +318,11 @@ impl Window {
                     module: &module,
                     entry_point: "main",
                     // TODO: add objects to the world
-                    buffers: &[],
+                    buffers: &[VertexBufferLayout {
+                        array_stride: size_of::<crate::Vertex>() as BufferAddress,
+                        step_mode: InputStepMode::Vertex,
+                        attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                    }],
                 },
                 fragment: None,
                 // How the triangles will be rasterized
