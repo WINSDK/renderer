@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{borrow::Cow, fmt::Debug, fs, mem::size_of, path::Path};
+use std::{borrow::Cow, fmt::Debug, fs, mem::size_of, path::{Path, PathBuf}};
 use wgpu::*;
 use winit::{
     dpi::PhysicalSize,
@@ -27,10 +27,20 @@ fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) 
         .with_transparent(true)
         .with_drag_and_drop(true)
         .with_always_on_top(true)
-        .with_taskbar_icon(icon)
+        .with_taskbar_icon(icon.clone())
         .with_window_icon(icon)
         .build(&event_loop)
         .unwrap()
+}
+
+fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let cache_path = path.as_ref().with_extension("spv");
+    let cache_path = cache_path.file_name().unwrap();
+    if cfg!(target_os = "unix") {
+        Path::new("/tmp").join(cache_path)
+    } else {
+        Path::new(&std::env::var("TMP").unwrap()).join(cache_path)
+    }
 }
 
 #[cfg(all(feature = "naga", not(feature = "shaderc")))]
@@ -46,13 +56,10 @@ fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
         valid::{ValidationFlags, Validator},
     };
 
-    let cache_path = path.as_ref().with_extension("spv");
-    let cache_path = cache_path.file_name().unwrap();
-    let cache_path = Path::new("/tmp").join(cache_path);
-
+    let cache_path = create_cache_path(&path);
     log::info!("reading shader from: {:?}", path);
 
-    let src = fs::read_to_string(path.as_ref()).unwrap();
+    let src = fs::read_to_string(&path).unwrap();
     let module = {
         let mut entry_points = naga::FastHashMap::default();
         entry_points.insert("main".to_string(), naga::ShaderStage::Vertex);
@@ -102,14 +109,11 @@ fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     flags: ShaderFlags,
     device: &Device,
 ) -> ShaderModule {
-    let cache_path = path.as_ref().with_extension("spv");
-    let cache_path = cache_path.file_name().unwrap();
-    let cache_path = Path::new("/tmp").join(cache_path);
-
+    let cache_path = create_cache_path(path.as_ref());
     log::info!("reading shader from: {:?}", path);
 
     let mut compiler = shaderc::Compiler::new().unwrap();
-    let src = fs::read_to_string(path.as_ref()).unwrap();
+    let src = fs::read_to_string(&path).unwrap();
     let binary = compiler
         .compile_into_spirv(
             &src,

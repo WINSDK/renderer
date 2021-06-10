@@ -27,7 +27,7 @@ pub struct Vertex {
 pub struct CameraUniform {
     view: na::Matrix4<f32>,
     proj: na::Matrix4<f32>,
-    model: na::Vector3<f32>,
+    model: na::Matrix4<f32>,
 }
 
 impl CameraUniform {
