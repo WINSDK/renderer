@@ -21,7 +21,7 @@ png = "0.16"
 # futures = { version = "0.3", features = ["async-await"] }
 
 [features]
-default = ["naga"]
+default = ["shaderc"]
 
 [profile.dev]
 split-debuginfo = "unpacked"

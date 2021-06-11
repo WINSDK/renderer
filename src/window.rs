@@ -1,12 +1,20 @@
-#![allow(dead_code)]
-
-use std::{borrow::Cow, fmt::Debug, fs, mem::size_of, path::{Path, PathBuf}};
+use std::{
+    borrow::Cow,
+    fmt::Debug,
+    io,
+    mem::size_of,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::fs;
 use wgpu::*;
 use winit::{
-    dpi::PhysicalSize,
+    dpi::{PhysicalSize, Size},
     event_loop::EventLoop,
     window::{Icon, Window as WindowHandle, WindowBuilder},
 };
+
+const MIN_WIN_SIZE: Size = Size::Physical(PhysicalSize::new(350, 250));
 
 #[cfg(not(target_os = "windows"))]
 fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) -> WindowHandle {
@@ -14,6 +22,7 @@ fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) 
         .with_title(title)
         .with_always_on_top(true)
         .with_window_icon(icon)
+        .with_min_inner_size(MIN_WIN_SIZE)
         .build(event_loop)
         .unwrap()
 }
@@ -29,6 +38,7 @@ fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) 
         .with_always_on_top(true)
         .with_taskbar_icon(icon.clone())
         .with_window_icon(icon)
+        .with_min_inner_size(MIN_WIN_SIZE)
         .build(&event_loop)
         .unwrap()
 }
@@ -44,25 +54,32 @@ fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
 }
 
 #[cfg(all(feature = "naga", not(feature = "shaderc")))]
-fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
+async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStage,
     flags: ShaderFlags,
     device: &Device,
-) -> ShaderModule {
+) -> io::Result<ShaderModule> {
     use naga::{
         back::spv,
         front::glsl,
         valid::{ValidationFlags, Validator},
     };
 
-    let cache_path = create_cache_path(&path);
-    log::info!("reading shader from: {:?}", path);
+    let stage = match stage {
+        ShaderStage::COMPUTE => naga::ShaderStage::Compute,
+        ShaderStage::VERTEX => naga::ShaderStage::Vertex,
+        ShaderStage::FRAGMENT => naga::ShaderStage::Fragment,
+        _ => unsafe { std::hint::unreachable_unchecked() },
+    };
 
-    let src = fs::read_to_string(&path).unwrap();
+    let cache_path = create_cache_path(&path);
+    log::info!("Reading shader from: {:?}", path);
+
+    let src = fs::read_to_string(&path).await?;
     let module = {
         let mut entry_points = naga::FastHashMap::default();
-        entry_points.insert("main".to_string(), naga::ShaderStage::Vertex);
+        entry_points.insert("main".to_string(), stage);
         glsl::parse_str(
             &src,
             &glsl::Options {
@@ -83,7 +100,9 @@ fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
             .unwrap()
     };
 
-    let spv = spv::write_vec(&module, &analysis, &spv::Options::default()).unwrap();
+    let spv = spv::write_vec(&module, &analysis, &spv::Options::default())
+        .map_err(io::ErrorKind::InvalidData)?;
+
     let binary = spv
         .iter()
         .fold(Vec::with_capacity(spv.len() * 4), |mut v, w| {
@@ -91,59 +110,60 @@ fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
             v
         });
 
-    fs::write(cache_path, binary.as_slice()).unwrap();
+    fs::write(cache_path, binary.as_slice()).await?;
     let binary: Vec<u32> = unsafe { std::mem::transmute(binary) };
 
     // TODO: do a checksum.
-    device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::from(binary)),
         flags,
-    })
+    }))
 }
 
 #[cfg(feature = "shaderc")]
-fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
+async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStage,
     flags: ShaderFlags,
     device: &Device,
-) -> ShaderModule {
+) -> io::Result<ShaderModule> {
+    let stage = match stage {
+        ShaderStage::COMPUTE => shaderc::ShaderKind::Compute,
+        ShaderStage::VERTEX => shaderc::ShaderKind::Vertex,
+        ShaderStage::FRAGMENT => shaderc::ShaderKind::Fragment,
+        _ => unsafe { std::hint::unreachable_unchecked() },
+    };
+
     let cache_path = create_cache_path(path.as_ref());
-    log::info!("reading shader from: {:?}", path);
+    log::info!("Reading shader from: {:?}", path);
 
     let mut compiler = shaderc::Compiler::new().unwrap();
-    let src = fs::read_to_string(&path).unwrap();
+    let src = fs::read_to_string(&path).await?;
     let binary = compiler
-        .compile_into_spirv(
-            &src,
-            shaderc::ShaderKind::Vertex,
-            cache_path.to_str().unwrap(),
-            "main",
-            None,
-        )
+        .compile_into_spirv(&src, stage, cache_path.to_str().unwrap(), "main", None)
         .unwrap_or_else(|err| panic!("{}", err));
 
-    fs::write(cache_path, binary.as_binary_u8()).unwrap();
+    fs::write(cache_path, binary.as_binary_u8()).await?;
 
     // TODO: do a checksum.
-    device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::from(binary.as_binary())),
         flags,
-    })
+    }))
 }
 
-struct Display {
-    window: WindowHandle,
+pub struct Display {
+    window: Arc<WindowHandle>,
     event_loop: EventLoop<()>,
     size: PhysicalSize<u32>,
-    instance: Instance,
-    surface: Surface,
-    adapter: Adapter,
-    device: Device,
-    queue: Queue,
-    backend: BackendBit,
+    pub instance: Instance,
+    pub surface: Surface,
+    pub adapter: Adapter,
+    pub device: Device,
+    pub queue: Queue,
+    pub backend: BackendBit,
 }
 
 impl Display {
@@ -161,10 +181,10 @@ impl Display {
             reader.next_frame(&mut icon).unwrap();
             let icon = Icon::from_rgba(icon, info.width, info.height).ok();
 
-            generate_window("Remotely possible", icon, &event_loop)
+            Arc::new(generate_window("Remotely possible", icon, &event_loop))
         };
 
-        log::info!("finished creating window..");
+        log::info!("Finished creating window..");
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         let backend = BackendBit::VULKAN;
@@ -175,7 +195,7 @@ impl Display {
         let power_preference = PowerPreference::HighPerformance;
 
         let size = window.inner_size();
-        let surface = unsafe { instance.create_surface(&window) };
+        let surface = unsafe { instance.create_surface(window.clone().as_ref()) };
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference,
@@ -196,7 +216,7 @@ impl Display {
             )
             .await?;
 
-        log::info!("requested device..");
+        log::info!("Requested device..");
 
         Ok(Self {
             window,
@@ -213,11 +233,12 @@ impl Display {
 }
 
 pub struct Window {
-    display: Display,
-    swap_chains: Vec<SwapChains>,
-    bind_groups: Vec<BindGroups>,
-    pipelines: Vec<Pipelines>,
-    uniform_buffers: Vec<Buffer>,
+    pub display: Display,
+    pub swap_chains: Vec<SwapChains>,
+    pub bind_groups: Vec<BindGroups>,
+    pub pipelines: Vec<Pipelines>,
+    pub uniform_buffers: Vec<Buffer>,
+    pub vertex_buffers: Vec<Buffer>,
 }
 
 impl Window {
@@ -238,7 +259,7 @@ impl Window {
             .device
             .create_swap_chain(&display.surface, &swap_chain_desc);
 
-        log::info!("initializing vertex data..");
+        log::info!("Initializing vertex data..");
         let vertex_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera vertex buffer"),
             size: 3 * size_of::<crate::Vertex>() as u64,
@@ -250,7 +271,7 @@ impl Window {
             .queue
             .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(crate::VERTICES));
 
-        log::info!("initializing uniform buffer data..");
+        log::info!("Initializing uniform buffer data..");
         let uniform_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera uniform buffer"),
             size: size_of::<crate::CameraUniform>() as u64,
@@ -301,7 +322,9 @@ impl Window {
             ShaderStage::VERTEX,
             flags,
             &display.device,
-        );
+        )
+        .await
+        .unwrap();
 
         let pipeline_layout = display
             .device
@@ -352,14 +375,23 @@ impl Window {
             bind_groups: BindGroups::new_as_vec(bind_group, bind_group_layout),
             pipelines: Pipelines::new_as_vec(pipeline, pipeline_layout),
             uniform_buffers: vec![uniform_buffer],
+            vertex_buffers: vec![vertex_buffer],
         }
+    }
+
+    pub fn get_event_loop<'a>(&mut self) -> EventLoop<()> {
+        std::mem::replace(&mut self.display.event_loop, EventLoop::new())
+    }
+
+    pub fn get_window_handle(&self) -> Arc<WindowHandle> {
+        self.display.window.clone()
     }
 }
 
 macro_rules! gen_struct_pair {
     ($name:ident: { $($field:ident: $val:ident $(,)?)+ } ) => {
-        struct $name {
-            $($field: $val),+
+        pub struct $name {
+            $(pub $field: $val),+
         }
 
         impl $name {
@@ -376,8 +408,8 @@ macro_rules! gen_struct_pair {
 }
 
 gen_struct_pair![SwapChains: {
-    swaper: SwapChain,
-    descer: SwapChainDescriptor
+    chain: SwapChain,
+    desc: SwapChainDescriptor
 }];
 
 gen_struct_pair![Pipelines: {

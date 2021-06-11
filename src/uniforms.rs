@@ -10,16 +10,25 @@ pub const OPENGL_TO_WGPU: na::Matrix4<f32> = na::Matrix4::new(
 );
 
 pub const VERTICES: &[Vertex] = &[
-    Vertex { position: na::Vector3::new(0.0, 0.5, 0.0), color: na::Vector3::new(1.0, 0.0, 0.0) },
-    Vertex { position: na::Vector3::new(-0.5, -0.5, 0.0), color: na::Vector3::new(0.0, 1.0, 0.0) },
-    Vertex { position: na::Vector3::new(0.5, -0.5, 0.0), color: na::Vector3::new(0.0, 0.0, 1.0) },
+    Vertex {
+        position: na::Vector3::new(0.0, 0.5, 0.0),
+        color: na::Vector3::new(1.0, 0.0, 0.0),
+    },
+    Vertex {
+        position: na::Vector3::new(-0.5, -0.5, 0.0),
+        color: na::Vector3::new(0.0, 1.0, 0.0),
+    },
+    Vertex {
+        position: na::Vector3::new(0.5, -0.5, 0.0),
+        color: na::Vector3::new(0.0, 0.0, 1.0),
+    },
 ];
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct Vertex {
     position: na::Vector3<f32>,
-    color: na::Vector3<f32>
+    color: na::Vector3<f32>,
 }
 
 #[repr(C)]

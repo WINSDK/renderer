@@ -16,7 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     env_logger::init();
-    let _window = window::Window::new().await;
+    let window = window::Window::new().await;
+    events::run(window).await;
 
-    loop {}
+    Ok(())
 }
