@@ -59,8 +59,9 @@ pub async fn run(mut window: crate::Window) {
                 WindowEvent::Resized(size) => {
                     let display = &window.display;
                     window.swap_chains.iter_mut().for_each(|swap| {
-                        swap.desc.width = size.width.max(350);
-                        swap.desc.height = size.height.max(250);
+                        let max = crate::MIN_REAL_SIZE;
+                        swap.desc.width = size.width.max(max.width);
+                        swap.desc.height = size.height.max(max.height);
                         swap.chain = display
                             .device
                             .create_swap_chain(&display.surface, &swap.desc);
@@ -68,6 +69,7 @@ pub async fn run(mut window: crate::Window) {
                 }
                 _ => (),
             },
+            Event::RedrawRequested(_) => window.redraw(),
             Event::MainEventsCleared => {
                 window_handle.request_redraw();
             }

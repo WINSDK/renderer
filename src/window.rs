@@ -14,7 +14,8 @@ use winit::{
     window::{Icon, Window as WindowHandle, WindowBuilder},
 };
 
-const MIN_WIN_SIZE: Size = Size::Physical(PhysicalSize::new(350, 250));
+pub const MIN_REAL_SIZE: PhysicalSize<u32> = PhysicalSize::new(350, 250);
+pub const MIN_WIN_SIZE: Size = Size::Physical(PhysicalSize::new(350, 250));
 
 #[cfg(not(target_os = "windows"))]
 fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) -> WindowHandle {
@@ -244,15 +245,22 @@ pub struct Window {
 impl Window {
     pub async fn new() -> Self {
         let display = Display::new().await.unwrap();
+        let mut present_mode = PresentMode::Mailbox;
+
+        if cfg!(target_os = "macos") {
+            // TEMP: macos doesn't seem to support MailBox
+            present_mode = PresentMode::Fifo;
+        }
+
         let swap_chain_desc = SwapChainDescriptor {
             usage: TextureUsage::RENDER_ATTACHMENT,
             format: display
                 .adapter
                 .get_swap_chain_preferred_format(&display.surface)
-                .unwrap(),
+                .unwrap_or(TextureFormat::Depth32Float),
             width: display.size.width,
             height: display.size.height,
-            present_mode: PresentMode::Mailbox,
+            present_mode,
         };
 
         let swap_chain = display
@@ -260,7 +268,7 @@ impl Window {
             .create_swap_chain(&display.surface, &swap_chain_desc);
 
         log::info!("Initializing vertex data..");
-        let vertex_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
+        let vertex_buffer = display.device.create_buffer(&BufferDescriptor {
             label: Some("Camera vertex buffer"),
             size: 3 * size_of::<crate::Vertex>() as u64,
             usage: BufferUsage::VERTEX | BufferUsage::COPY_DST,
@@ -272,11 +280,11 @@ impl Window {
             .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(crate::VERTICES));
 
         log::info!("Initializing uniform buffer data..");
-        let uniform_buffer = display.device.create_buffer(&wgpu::BufferDescriptor {
+        let uniform_buffer = display.device.create_buffer(&BufferDescriptor {
             label: Some("Camera uniform buffer"),
             size: size_of::<crate::CameraUniform>() as u64,
             usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            mapped_at_creation: true,
+            mapped_at_creation: false,
         });
 
         let uniform = crate::CameraUniform::new(display.size.width, display.size.height);
@@ -317,14 +325,19 @@ impl Window {
             flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
         }
 
-        let module = generate_vulkan_shader_module(
-            "./shaders/cam.glsl",
-            ShaderStage::VERTEX,
-            flags,
-            &display.device,
-        )
-        .await
-        .unwrap();
+        //let module = generate_vulkan_shader_module(
+        //    "./shaders/cam.glsl",
+        //    ShaderStage::VERTEX,
+        //    flags,
+        //    &display.device,
+        //)
+        //.await
+        //.unwrap();
+        let module = display.device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("../shaders/cam.wgsl"))),
+                flags,
+        });
 
         let pipeline_layout = display
             .device
@@ -343,7 +356,7 @@ impl Window {
                 layout: Some(&pipeline_layout),
                 vertex: VertexState {
                     module: &module,
-                    entry_point: "main",
+                    entry_point: "vs_main",
                     // TODO: add objects to the world
                     buffers: &[VertexBufferLayout {
                         array_stride: size_of::<crate::Vertex>() as BufferAddress,
@@ -359,13 +372,7 @@ impl Window {
                     front_face: FrontFace::Cw,
                     ..Default::default()
                 },
-                depth_stencil: Some(DepthStencilState {
-                    format: TextureFormat::Depth32Float,
-                    depth_write_enabled: false,
-                    depth_compare: CompareFunction::Less,
-                    stencil: StencilState::default(),
-                    bias: DepthBiasState::default(),
-                }),
+                depth_stencil: None,
                 multisample: MultisampleState::default(),
             });
 
@@ -377,6 +384,49 @@ impl Window {
             uniform_buffers: vec![uniform_buffer],
             vertex_buffers: vec![vertex_buffer],
         }
+    }
+
+    pub fn redraw(&mut self) {
+        let frame = self.swap_chains[0]
+            .chain
+            .get_current_frame()
+            .unwrap()
+            .output;
+
+        let mut encoder = self
+            .display
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Primary encoder"),
+            });
+        log::info!("Created encoder");
+
+        let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            label: None,
+            color_attachments: &[wgpu::RenderPassColorAttachment {
+                view: &frame.view,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color {
+                        r: 100.0,
+                        g: 50.0,
+                        b: 80.0,
+                        a: 1.0,
+                    }),
+                    store: true,
+                },
+            }],
+            depth_stencil_attachment: None,
+        });
+        log::info!("Created render_pass");
+
+        render_pass.set_pipeline(&self.pipelines[0].pipe);
+        render_pass.set_bind_group(0, &self.bind_groups[0].group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffers[0].slice(..));
+        render_pass.draw(0..crate::VERTICES.len() as u32, 0..1);
+        drop(render_pass); // Required because render_pass and queue takes a &T.
+
+        self.display.queue.submit(Some(encoder.finish()));
     }
 
     pub fn get_event_loop<'a>(&mut self) -> EventLoop<()> {
@@ -394,6 +444,7 @@ macro_rules! gen_struct_pair {
             $(pub $field: $val),+
         }
 
+        #[allow(dead_code)]
         impl $name {
             fn new($($field: $val),+) -> Self {
                 Self { $($field),+ }
