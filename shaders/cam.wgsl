@@ -7,18 +7,36 @@ struct Uniforms {
 
 [[group(0), binding(0)]] var<uniform> uniforms: Uniforms;
 
-struct Output {
-  [[builtin(position)]] pos: vec4<f32>;
-  [[location(0)]] col: vec3<f32>;
+struct VertexInput {
+    [[location(0)]] pos: vec3<f32>;
+    [[location(1)]] tex: vec2<f32>;
+};
+
+struct VertexOutput {
+    [[builtin(position)]] pos: vec4<f32>;
+    [[location(1)]] tex: vec2<f32>;
 };
 
 [[stage(vertex)]]
-fn vs_main([[location(0)]] pos: vec3<f32>, [[location(1)]] col: vec3<f32>) -> Output {
-  var out: Output;
+fn vs_main(in: VertexInput) -> VertexOutput {
+  var out: VertexOutput;
 
-  let model_pos: vec4<f32> = uniforms.model * vec4<f32>(pos, 1.0);
+  out.tex = in.tex;
+  out.pos = in.pos;
+
+  let model_pos: vec4<f32> = uniforms.model * in.pos; // can't do this
   let view_pos: vec4<f32> = uniforms.view * model_pos;
 
   out.pos = uniforms.proj * view_pos;
   return out;
+}
+
+[[binding(0), group(0)]]
+var t_diffuse: texture_2d<f32>;
+[[binding(1), group(1)]]
+var s_diffuse: sampler;
+
+[[stage(fragment)]]
+fn main(in: VertexOutput) -> [[location(0)]] vec4<f32> {
+    return textureSample(t_diffuse, s_diffuse, in.tex);
 }

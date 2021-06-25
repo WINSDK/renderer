@@ -6,8 +6,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1.6", features = ["full"] }
-bytemuck = { version = "1.5", features = ["derive"] }
+tokio = { version = "1.7", features = ["full"] }
+bytemuck = { version = "1.7", features = ["derive"] }
 nalgebra = { version = "*", features = ["bytemuck"] }
 
 naga = { version = "*", features = ["glsl-in", "spv-out"], optional = true }
@@ -15,7 +15,7 @@ shaderc = { version = "0.7", optional = true }
 
 env_logger = "0.8"
 winit = "0.25"
-wgpu = "0.8"
+wgpu = "0.9"
 log = "0.4"
 png = "0.16"
 # futures = { version = "0.3", features = ["async-await"] }

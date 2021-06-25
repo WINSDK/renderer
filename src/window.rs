@@ -171,17 +171,11 @@ impl Display {
     async fn new() -> Result<Self, wgpu::RequestDeviceError> {
         let event_loop = EventLoop::new();
         let window = {
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
-            const ICON: &[u8] = include_bytes!("../res/iconx256.png");
             #[cfg(target_os = "linux")]
-            const ICON: &[u8] = include_bytes!("../res/iconx64.png");
-
-            let decoder = png::Decoder::new(ICON);
-            let (info, mut reader) = decoder.read_info().unwrap();
-            let mut icon = vec![0; info.buffer_size()];
-            reader.next_frame(&mut icon).unwrap();
-            let icon = Icon::from_rgba(icon, info.width, info.height).ok();
-
+            let icon = crate::read_png("./res/iconx64.png").await.unwrap();
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            let icon = crate::read_png("./res/iconx256.png").await.unwrap();
+            let icon = Icon::from_rgba(icon.data, icon.width, icon.height).ok();
             Arc::new(generate_window("Remotely possible", icon, &event_loop))
         };
 
@@ -240,6 +234,8 @@ pub struct Window {
     pub pipelines: Vec<Pipelines>,
     pub uniform_buffers: Vec<Buffer>,
     pub vertex_buffers: Vec<Buffer>,
+    pub index_buffers: Vec<Buffer>,
+    pub index_count: usize,
 }
 
 impl Window {
@@ -247,7 +243,7 @@ impl Window {
         let display = Display::new().await.unwrap();
         let mut present_mode = PresentMode::Mailbox;
 
-        if cfg!(target_os = "macos") {
+        if display.backend == BackendBit::METAL {
             // TEMP: macos doesn't seem to support MailBox
             present_mode = PresentMode::Fifo;
         }
@@ -267,17 +263,84 @@ impl Window {
             .device
             .create_swap_chain(&display.surface, &swap_chain_desc);
 
+        let (vertices, indices) = crate::create_vertices();
+
+        log::info!("Reading texture and writting to queue..");
+        let texture = crate::Texture::new(
+            "./res/joe_biden.png",
+            &display.device,
+            &display.queue,
+            &swap_chain_desc,
+        )
+        .await
+        .unwrap();
+
+        let texture_bind_group_layout =
+            display
+                .device
+                .create_bind_group_layout(&BindGroupLayoutDescriptor {
+                    label: Some("Texture bind group layout"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStage::FRAGMENT,
+                            ty: BindingType::Texture {
+                                multisampled: false,
+                                view_dimension: TextureViewDimension::D2,
+                                sample_type: TextureSampleType::Float { filterable: true },
+                            },
+                            count: None,
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStage::FRAGMENT,
+                            ty: BindingType::Sampler {
+                                comparison: false,
+                                filtering: true,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        let texture_bind_group = display.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Texture bind group"),
+            layout: &texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                },
+            ],
+        });
+
         log::info!("Initializing vertex data..");
         let vertex_buffer = display.device.create_buffer(&BufferDescriptor {
             label: Some("Camera vertex buffer"),
-            size: 3 * size_of::<crate::Vertex>() as u64,
+            size: (size_of::<crate::Vertex>() * vertices.len()) as u64,
             usage: BufferUsage::VERTEX | BufferUsage::COPY_DST,
-            mapped_at_creation: true,
+            mapped_at_creation: false,
         });
 
         display
             .queue
-            .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(crate::VERTICES));
+            .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
+
+        log::info!("Initializing indices..");
+        let index_buffer = display.device.create_buffer(&BufferDescriptor {
+            label: Some("Camera indices buffer"),
+            size: (size_of::<u16>() * indices.len()) as u64,
+            usage: BufferUsage::INDEX | BufferUsage::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        display
+            .queue
+            .write_buffer(&index_buffer, 0, bytemuck::cast_slice(indices.as_slice()));
 
         log::info!("Initializing uniform buffer data..");
         let uniform_buffer = display.device.create_buffer(&BufferDescriptor {
@@ -292,11 +355,11 @@ impl Window {
             .queue
             .write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
-        let bind_group_layout =
+        let uniform_bind_group_layout =
             display
                 .device
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: Some("Primary bind group layout"),
+                    label: Some("Uniform bind group layout"),
                     entries: &[BindGroupLayoutEntry {
                         binding: 0,
                         visibility: ShaderStage::FRAGMENT | ShaderStage::VERTEX,
@@ -311,9 +374,9 @@ impl Window {
                     }],
                 });
 
-        let bind_group = display.device.create_bind_group(&BindGroupDescriptor {
+        let uniform_bind_group = display.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Camera Bind Group"),
-            layout: &bind_group_layout,
+            layout: &uniform_bind_group_layout,
             entries: &[BindGroupEntry {
                 binding: 0,
                 resource: uniform_buffer.as_entire_binding(),
@@ -325,25 +388,26 @@ impl Window {
             flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
         }
 
-        //let module = generate_vulkan_shader_module(
-        //    "./shaders/cam.glsl",
-        //    ShaderStage::VERTEX,
-        //    flags,
-        //    &display.device,
-        //)
-        //.await
-        //.unwrap();
-        let module = display.device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("../shaders/cam.wgsl"))),
+        let (vert_module, frag_module) = tokio::join!(
+            generate_vulkan_shader_module(
+                "./shaders/cam.glsl",
+                ShaderStage::VERTEX,
                 flags,
-        });
+                &display.device,
+            ),
+            generate_vulkan_shader_module(
+                "./shaders/cam_frag.glsl",
+                ShaderStage::FRAGMENT,
+                flags,
+                &display.device,
+            ),
+        );
 
         let pipeline_layout = display
             .device
             .create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some("Pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout],
+                bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -355,16 +419,27 @@ impl Window {
                 label: Some("Primary pipeline"),
                 layout: Some(&pipeline_layout),
                 vertex: VertexState {
-                    module: &module,
-                    entry_point: "vs_main",
+                    module: &vert_module.unwrap(),
+                    entry_point: "main",
                     // TODO: add objects to the world
                     buffers: &[VertexBufferLayout {
                         array_stride: size_of::<crate::Vertex>() as BufferAddress,
                         step_mode: InputStepMode::Vertex,
-                        attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                        attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x2],
                     }],
                 },
-                fragment: None,
+                fragment: Some(wgpu::FragmentState {
+                    module: &frag_module.unwrap(),
+                    entry_point: "main",
+                    targets: &[wgpu::ColorTargetState {
+                        format: swap_chain_desc.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent::REPLACE,
+                            alpha: wgpu::BlendComponent::REPLACE,
+                        }),
+                        write_mask: wgpu::ColorWrite::ALL,
+                    }],
+                }),
                 // How the triangles will be rasterized
                 primitive: PrimitiveState {
                     // type of data we are passing in
@@ -373,16 +448,25 @@ impl Window {
                     ..Default::default()
                 },
                 depth_stencil: None,
-                multisample: MultisampleState::default(),
+                multisample: MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
             });
 
         Self {
             display,
             swap_chains: SwapChains::new_as_vec(swap_chain, swap_chain_desc),
-            bind_groups: BindGroups::new_as_vec(bind_group, bind_group_layout),
+            bind_groups: vec![
+                BindGroups::new(texture_bind_group, texture_bind_group_layout),
+                BindGroups::new(uniform_bind_group, uniform_bind_group_layout),
+            ],
             pipelines: Pipelines::new_as_vec(pipeline, pipeline_layout),
             uniform_buffers: vec![uniform_buffer],
             vertex_buffers: vec![vertex_buffer],
+            index_buffers: vec![index_buffer],
+            index_count: indices.len(),
         }
     }
 
@@ -403,7 +487,7 @@ impl Window {
 
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: None,
-            color_attachments: &[wgpu::RenderPassColorAttachment {
+            color_attachments: &[RenderPassColorAttachment {
                 view: &frame.view,
                 resolve_target: None,
                 ops: Operations {
@@ -422,14 +506,16 @@ impl Window {
 
         render_pass.set_pipeline(&self.pipelines[0].pipe);
         render_pass.set_bind_group(0, &self.bind_groups[0].group, &[]);
+        render_pass.set_bind_group(1, &self.bind_groups[1].group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffers[0].slice(..));
-        render_pass.draw(0..crate::VERTICES.len() as u32, 0..1);
+        render_pass.set_index_buffer(self.index_buffers[0].slice(..), IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.index_count as u32, 0, 0..1);
         drop(render_pass); // Required because render_pass and queue takes a &T.
 
         self.display.queue.submit(Some(encoder.finish()));
     }
 
-    pub fn get_event_loop<'a>(&mut self) -> EventLoop<()> {
+    pub fn get_event_loop(&mut self) -> EventLoop<()> {
         std::mem::replace(&mut self.display.event_loop, EventLoop::new())
     }
 
