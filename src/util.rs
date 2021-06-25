@@ -1,6 +1,6 @@
+use png::{BitDepth, ColorType};
 use std::io::{self, ErrorKind};
 use std::path::Path;
-use png::{ColorType, BitDepth};
 
 pub struct Png {
     pub data: Vec<u8>,

@@ -388,7 +388,7 @@ impl Window {
             flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
         }
 
-        let (vert_module, frag_module) = tokio::join!(
+        let (vert_module, frag_module) = tokio::try_join!(
             generate_vulkan_shader_module(
                 "./shaders/cam.glsl",
                 ShaderStage::VERTEX,
@@ -401,7 +401,8 @@ impl Window {
                 flags,
                 &display.device,
             ),
-        );
+        )
+        .unwrap();
 
         let pipeline_layout = display
             .device
@@ -419,7 +420,7 @@ impl Window {
                 label: Some("Primary pipeline"),
                 layout: Some(&pipeline_layout),
                 vertex: VertexState {
-                    module: &vert_module.unwrap(),
+                    module: &vert_module,
                     entry_point: "main",
                     // TODO: add objects to the world
                     buffers: &[VertexBufferLayout {
@@ -429,7 +430,7 @@ impl Window {
                     }],
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &frag_module.unwrap(),
+                    module: &frag_module,
                     entry_point: "main",
                     targets: &[wgpu::ColorTargetState {
                         format: swap_chain_desc.format,
@@ -491,9 +492,9 @@ impl Window {
                 resolve_target: None,
                 ops: Operations {
                     load: LoadOp::Clear(Color {
-                        r: 100.0,
-                        g: 50.0,
-                        b: 80.0,
+                        r: 0.1,
+                        g: 0.5,
+                        b: 0.8,
                         a: 1.0,
                     }),
                     store: true,
