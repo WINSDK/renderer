@@ -483,7 +483,6 @@ impl Window {
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("Primary encoder"),
             });
-        log::info!("Created encoder");
 
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: None,
@@ -502,7 +501,6 @@ impl Window {
             }],
             depth_stencil_attachment: None,
         });
-        log::info!("Created render_pass");
 
         render_pass.set_pipeline(&self.pipelines[0].pipe);
         render_pass.set_bind_group(0, &self.bind_groups[0].group, &[]);
