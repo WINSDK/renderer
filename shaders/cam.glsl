@@ -16,7 +16,6 @@ uniform CameraUniforms {
 void main() {
   out_tex = in_tex;
 
-  vec4 model_pos = model * vec4(in_pos, 1.0);
-  vec4 view_pos = view * model_pos;
-  gl_Position = proj * view_pos;
+  mat4 mvp = proj * view * model;
+  gl_Position = mvp * vec4(in_pos, 1.0);
 }

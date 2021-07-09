@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     fmt::Debug,
     io,
-    mem::size_of,
+    mem::{size_of, transmute},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -54,8 +54,58 @@ fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
     }
 }
 
+/// checks if shader is already cached, if so returns a ShaderModule
+async fn shader_checksum<P: AsRef<Path>>(
+    shader_path: P,
+    flags: ShaderFlags,
+    device: &Device,
+) -> io::Result<ShaderModule> {
+    use tokio::io::AsyncReadExt;
+
+    let shader_path = shader_path.as_ref();
+    let shader = fs::read(shader_path).await?;
+    let cache_path = create_cache_path(shader_path);
+
+    let hash = {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&shader[4..]);
+        hasher.finalize()
+    };
+
+    let mut handle = fs::File::open(cache_path).await?;
+    let mut buf = [0u8; 4];
+
+    handle.read_exact(&mut buf).await?;
+
+    // cached shader matches shader source.
+    if hash == unsafe { transmute(buf) } {
+        let shader: Vec<u32> = unsafe { transmute(shader) };
+
+        return Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: ShaderSource::SpirV(Cow::from(&shader[4..])),
+            flags,
+        }));
+    }
+
+    Err(io::ErrorKind::NotFound.into())
+}
+
+async fn generate_vulkan_shader_module<P: AsRef<Path>>(
+    path: P,
+    stage: ShaderStage,
+    flags: ShaderFlags,
+    device: &Device,
+) -> io::Result<ShaderModule> {
+    if let Ok(shader) = shader_checksum(path.as_ref(), flags, device).await {
+        return Ok(shader);
+    }
+
+    compile_shader(path.as_ref(), stage, flags, device).await
+}
+
 #[cfg(all(feature = "naga", not(feature = "shaderc")))]
-async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
+async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStage,
     flags: ShaderFlags,
@@ -101,20 +151,21 @@ async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
             .unwrap()
     };
 
-    let spv = spv::write_vec(&module, &analysis, &spv::Options::default())
+    let binary = spv::write_vec(&module, &analysis, &spv::Options::default())
         .map_err(io::ErrorKind::InvalidData)?;
 
-    let binary = spv
-        .iter()
-        .fold(Vec::with_capacity(spv.len() * 4), |mut v, w| {
-            v.extend_from_slice(&w.to_le_bytes());
-            v
-        });
+    let hash = {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(binary.as_binary_u8());
+        hasher.finalize()
+    };
 
-    fs::write(cache_path, binary.as_slice()).await?;
+    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + 4);
+    file.extend(unsafe { transmute::<u32, [u8; 4]>(hash) });
+    file.extend_from_slice(binary.as_binary_u8());
+    fs::write(cache_path, file).await?;
+
     let binary: Vec<u32> = unsafe { std::mem::transmute(binary) };
-
-    // TODO: do a checksum.
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::from(binary)),
@@ -123,7 +174,7 @@ async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
 }
 
 #[cfg(feature = "shaderc")]
-async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
+async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStage,
     flags: ShaderFlags,
@@ -145,9 +196,17 @@ async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
         .compile_into_spirv(&src, stage, cache_path.to_str().unwrap(), "main", None)
         .unwrap_or_else(|err| panic!("{}", err));
 
-    fs::write(cache_path, binary.as_binary_u8()).await?;
+    let hash = {
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(binary.as_binary_u8());
+        hasher.finalize()
+    };
 
-    // TODO: do a checksum.
+    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + 4);
+    file.extend(unsafe { transmute::<u32, [u8; 4]>(hash) });
+    file.extend_from_slice(binary.as_binary_u8());
+    fs::write(cache_path, file).await?;
+
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::from(binary.as_binary())),
@@ -388,6 +447,7 @@ impl Window {
             flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
         }
 
+        let now = std::time::Instant::now();
         let (vert_module, frag_module) = tokio::try_join!(
             generate_vulkan_shader_module(
                 "./shaders/cam.glsl",
@@ -403,6 +463,9 @@ impl Window {
             ),
         )
         .unwrap();
+
+        log::info!("took {}ms to generate shaders", now.elapsed().as_millis());
+        drop(now);
 
         let pipeline_layout = display
             .device
