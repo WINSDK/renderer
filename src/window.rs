@@ -1,12 +1,4 @@
-use std::{
-    borrow::Cow,
-    fmt::Debug,
-    io,
-    mem::{size_of, transmute},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
-use tokio::fs;
+use std::{mem::size_of, sync::Arc};
 use wgpu::*;
 use winit::{
     dpi::{PhysicalSize, Size},
@@ -42,176 +34,6 @@ fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) 
         .with_min_inner_size(MIN_WIN_SIZE)
         .build(&event_loop)
         .unwrap()
-}
-
-fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
-    let cache_path = path.as_ref().with_extension("spv");
-    let cache_path = cache_path.file_name().unwrap();
-    if cfg!(target_os = "windows") {
-        Path::new(&std::env::var("TMP").unwrap()).join(cache_path)
-    } else {
-        Path::new("/tmp").join(cache_path)
-    }
-}
-
-/// checks if shader is already cached, if so returns a ShaderModule
-async fn shader_checksum<P: AsRef<Path>>(
-    shader_path: P,
-    flags: ShaderFlags,
-    device: &Device,
-) -> io::Result<ShaderModule> {
-    use tokio::io::AsyncReadExt;
-
-    let shader_path = shader_path.as_ref();
-    let shader = fs::read(shader_path).await?;
-    let cache_path = create_cache_path(shader_path);
-
-    let hash = {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&shader[4..]);
-        hasher.finalize()
-    };
-
-    let mut handle = fs::File::open(cache_path).await?;
-    let mut buf = [0u8; 4];
-
-    handle.read_exact(&mut buf).await?;
-
-    // cached shader matches shader source.
-    if hash == unsafe { transmute(buf) } {
-        let shader: Vec<u32> = unsafe { transmute(shader) };
-
-        return Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: ShaderSource::SpirV(Cow::from(&shader[4..])),
-            flags,
-        }));
-    }
-
-    Err(io::ErrorKind::NotFound.into())
-}
-
-async fn generate_vulkan_shader_module<P: AsRef<Path>>(
-    path: P,
-    stage: ShaderStage,
-    flags: ShaderFlags,
-    device: &Device,
-) -> io::Result<ShaderModule> {
-    if let Ok(shader) = shader_checksum(path.as_ref(), flags, device).await {
-        return Ok(shader);
-    }
-
-    compile_shader(path.as_ref(), stage, flags, device).await
-}
-
-#[cfg(all(feature = "naga", not(feature = "shaderc")))]
-async fn compile_shader<P: AsRef<Path> + Debug>(
-    path: P,
-    stage: ShaderStage,
-    flags: ShaderFlags,
-    device: &Device,
-) -> io::Result<ShaderModule> {
-    use naga::{
-        back::spv,
-        front::glsl,
-        valid::{ValidationFlags, Validator},
-    };
-
-    let stage = match stage {
-        ShaderStage::COMPUTE => naga::ShaderStage::Compute,
-        ShaderStage::VERTEX => naga::ShaderStage::Vertex,
-        ShaderStage::FRAGMENT => naga::ShaderStage::Fragment,
-        _ => unsafe { std::hint::unreachable_unchecked() },
-    };
-
-    let cache_path = create_cache_path(&path);
-    log::info!("Reading shader from: {:?}", path);
-
-    let src = fs::read_to_string(&path).await?;
-    let module = {
-        let mut entry_points = naga::FastHashMap::default();
-        entry_points.insert("main".to_string(), stage);
-        glsl::parse_str(
-            &src,
-            &glsl::Options {
-                entry_points,
-                defines: Default::default(),
-            },
-        )
-        .unwrap()
-    };
-
-    let analysis = if cfg!(debug_assertions) {
-        Validator::new(ValidationFlags::all())
-            .validate(&module)
-            .unwrap()
-    } else {
-        Validator::new(ValidationFlags::empty())
-            .validate(&module)
-            .unwrap()
-    };
-
-    let binary = spv::write_vec(&module, &analysis, &spv::Options::default())
-        .map_err(io::ErrorKind::InvalidData)?;
-
-    let hash = {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(binary.as_binary_u8());
-        hasher.finalize()
-    };
-
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + 4);
-    file.extend(unsafe { transmute::<u32, [u8; 4]>(hash) });
-    file.extend_from_slice(binary.as_binary_u8());
-    fs::write(cache_path, file).await?;
-
-    let binary: Vec<u32> = unsafe { std::mem::transmute(binary) };
-    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: ShaderSource::SpirV(Cow::from(binary)),
-        flags,
-    }))
-}
-
-#[cfg(feature = "shaderc")]
-async fn compile_shader<P: AsRef<Path> + Debug>(
-    path: P,
-    stage: ShaderStage,
-    flags: ShaderFlags,
-    device: &Device,
-) -> io::Result<ShaderModule> {
-    let stage = match stage {
-        ShaderStage::COMPUTE => shaderc::ShaderKind::Compute,
-        ShaderStage::VERTEX => shaderc::ShaderKind::Vertex,
-        ShaderStage::FRAGMENT => shaderc::ShaderKind::Fragment,
-        _ => unsafe { std::hint::unreachable_unchecked() },
-    };
-
-    let cache_path = create_cache_path(path.as_ref());
-    log::info!("Reading shader from: {:?}", path);
-
-    let mut compiler = shaderc::Compiler::new().unwrap();
-    let src = fs::read_to_string(&path).await?;
-    let binary = compiler
-        .compile_into_spirv(&src, stage, cache_path.to_str().unwrap(), "main", None)
-        .unwrap_or_else(|err| panic!("{}", err));
-
-    let hash = {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(binary.as_binary_u8());
-        hasher.finalize()
-    };
-
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + 4);
-    file.extend(unsafe { transmute::<u32, [u8; 4]>(hash) });
-    file.extend_from_slice(binary.as_binary_u8());
-    fs::write(cache_path, file).await?;
-
-    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
-        label: None,
-        source: ShaderSource::SpirV(Cow::from(binary.as_binary())),
-        flags,
-    }))
 }
 
 pub struct Display {
@@ -449,13 +271,13 @@ impl Window {
 
         let now = std::time::Instant::now();
         let (vert_module, frag_module) = tokio::try_join!(
-            generate_vulkan_shader_module(
+            crate::generate_vulkan_shader_module(
                 "./shaders/cam.glsl",
                 ShaderStage::VERTEX,
                 flags,
                 &display.device,
             ),
-            generate_vulkan_shader_module(
+            crate::generate_vulkan_shader_module(
                 "./shaders/cam_frag.glsl",
                 ShaderStage::FRAGMENT,
                 flags,
