@@ -103,7 +103,7 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
     if hash == u32::from_le_bytes(buf) {
         use std::convert::TryInto;
 
-        let shader: Vec<u32> = shader
+        let shader: Vec<u32> = shader[4..] // ignoring the 4 checksum bytes
             .chunks(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
@@ -111,7 +111,7 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
         log::info!("Reading cached shader from: {:?}", path);
         Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: None,
-            source: ShaderSource::SpirV(Cow::Borrowed(&shader[4..])),
+            source: ShaderSource::SpirV(Cow::Borrowed(shader.as_slice())),
             flags,
         }))
     } else {
@@ -119,7 +119,7 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
     }
 }
 
-#[cfg(all(feature = "naga", not(feature = "shaderc")))]
+#[cfg(not(feature = "shaderc"))]
 async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStage,
@@ -136,7 +136,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         ShaderStage::COMPUTE => naga::ShaderStage::Compute,
         ShaderStage::VERTEX => naga::ShaderStage::Vertex,
         ShaderStage::FRAGMENT => naga::ShaderStage::Fragment,
-        _ => unsafe { std::hint::unreachable_unchecked() },
+        _ => unreachable!(),
     };
 
     let src = fs::read_to_string(&path).await?;

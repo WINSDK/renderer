@@ -7,7 +7,7 @@ use winit::{
 };
 
 pub const MIN_REAL_SIZE: PhysicalSize<u32> = PhysicalSize::new(350, 250);
-pub const MIN_WIN_SIZE: Size = Size::Physical(PhysicalSize::new(350, 250));
+pub const MIN_WIN_SIZE: Size = Size::Physical(MIN_REAL_SIZE);
 
 #[cfg(not(target_os = "windows"))]
 fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) -> WindowHandle {
