@@ -1,4 +1,5 @@
 [package]
+resolver = "2"
 name = "display"
 version = "0.2.0"
 edition = "2018"
@@ -14,11 +15,14 @@ naga = { version = "*", features = ["glsl-in", "spv-out"], optional = true }
 shaderc = { version = "0.7", optional = true }
 
 env_logger = "0.8"
-crc32fast = "1.2"
+# crc32fast = "1.2"
 winit = "0.25"
 wgpu = "0.9"
 log = "0.4"
 png = "0.16"
+
+tokio-stream = "0.1"
+async-compression = { version = "0.3", features = ["tokio", "zlib"] }
 # futures = { version = "0.3", features = ["async-await"] }
 
 [features]

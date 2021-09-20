@@ -5,6 +5,8 @@ use std::{
     io::{self, ErrorKind},
     mem::size_of,
     path::{Path, PathBuf},
+    collections::hash_map::DefaultHasher,
+    hash::Hasher,
 };
 use tokio::fs;
 use wgpu::{Device, ShaderFlags, ShaderModule, ShaderSource, ShaderStage};
@@ -18,32 +20,25 @@ pub struct Png {
     pub line_size: usize,
 }
 
+#[inline(always)]
 pub async fn read_png<P: AsRef<Path>>(path: P) -> Result<Png, io::Error> {
-    let bytes = tokio::fs::read(path).await?;
-    let decoder = png::Decoder::new(bytes.as_slice());
-    let (info, mut reader) = decoder.read_info().map_err(|_| ErrorKind::InvalidData)?;
-    let mut data = vec![0; info.buffer_size()];
-    reader
-        .next_frame(&mut data)
-        .map_err(|_| ErrorKind::InvalidData)?;
-
-    Ok(Png {
-        data,
-        width: info.width,
-        height: info.height,
-        color_type: info.color_type,
-        bit_depth: info.bit_depth,
-        line_size: info.line_size,
-    })
+    let bytes = tokio::fs::read(&path).await?;
+    eprintln!("{:?}", path.as_ref());
+    assert_eq!(
+        crate::png::Png::new(&bytes).await.unwrap().data,
+        convert_to_png(&bytes).await.unwrap().data
+    );
+    convert_to_png(bytes.as_slice()).await
 }
 
 pub async fn convert_to_png(bytes: &[u8]) -> Result<Png, io::Error> {
     let decoder = png::Decoder::new(bytes);
     let (info, mut reader) = decoder.read_info().map_err(|_| ErrorKind::InvalidData)?;
     let mut data = vec![0; info.buffer_size()];
-    reader
-        .next_frame(&mut data)
-        .map_err(|_| ErrorKind::InvalidData)?;
+    reader.next_frame(&mut data).map_err(|_| ErrorKind::InvalidData)?;
+
+    debug_assert!(info.color_type as u32 > 3); // ColorType::(RGBA | GrayscaleAlpha)
+
     Ok(Png {
         data,
         width: info.width,
@@ -69,6 +64,7 @@ pub async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     }
 }
 
+#[inline(always)]
 fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
     let cache_path = path.as_ref().with_extension("spv");
     let cache_path = cache_path.file_name().unwrap();
@@ -89,21 +85,21 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
 
     let shader = fs::read(&path).await?;
     let hash = {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&shader[4..]);
-        hasher.finalize()
+        let mut hasher = DefaultHasher::new();
+        hasher.write(&shader[4..]);
+        hasher.finish()
     };
 
     let mut handle = fs::File::open(&path).await?;
-    let mut buf = [0u8; 4];
+    let mut buf = [0u8; 8];
 
     handle.read_exact(&mut buf).await?;
 
     // cached shader matches shader source.
-    if hash == u32::from_le_bytes(buf) {
+    if hash == u64::from_le_bytes(buf) {
         use std::convert::TryInto;
 
-        let shader: Vec<u32> = shader[4..] // ignoring the 4 checksum bytes
+        let shader: Vec<u32> = shader[8..] // ignoring the 4 checksum bytes
             .chunks(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
@@ -143,44 +139,33 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     let module = {
         let mut entry_points = naga::FastHashMap::default();
         entry_points.insert("main".to_string(), stage);
-        glsl::parse_str(
-            &src,
-            &glsl::Options {
-                entry_points,
-                defines: Default::default(),
-            },
-        )
-        .unwrap()
+        glsl::parse_str(&src, &glsl::Options { entry_points, defines: Default::default() }).unwrap()
     };
 
     let analysis = if cfg!(debug_assertions) {
-        Validator::new(ValidationFlags::all())
-            .validate(&module)
-            .unwrap()
+        Validator::new(ValidationFlags::all()).validate(&module).unwrap()
     } else {
-        Validator::new(ValidationFlags::empty())
-            .validate(&module)
-            .unwrap()
+        Validator::new(ValidationFlags::empty()).validate(&module).unwrap()
     };
 
     let binary = spv::write_vec(&module, &analysis, &spv::Options::default())
         .map_err(io::ErrorKind::InvalidData)?;
 
     let hash = {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(binary.as_binary_u8());
-        hasher.finalize()
+        let mut hasher = DefaultHasher::new();
+        hasher.write(binary.as_binary_u8());
+        hasher.finish()
     };
 
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + 4);
-    file.extend(u32::to_le_bytes(hash));
+    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of::<u64>());
+    file.extend(u64::to_le_bytes(hash));
     file.extend_from_slice(binary.as_binary_u8());
 
     fs::write(create_cache_path(path), file).await?;
 
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
-        source: ShaderSource::SpirV(Cow::Owned(binary)),
+        source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
         flags,
     }))
 }
@@ -206,13 +191,13 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         .unwrap();
 
     let hash = {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(binary.as_binary_u8());
-        hasher.finalize()
+        let mut hasher = DefaultHasher::new();
+        hasher.write(binary.as_binary_u8());
+        hasher.finish()
     };
 
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of::<u32>());
-    file.extend(u32::to_le_bytes(hash));
+    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of::<u64>());
+    file.extend(u64::to_le_bytes(hash));
     file.extend_from_slice(binary.as_binary_u8());
 
     fs::write(create_cache_path(path), file).await?;

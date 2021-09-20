@@ -94,17 +94,7 @@ impl Display {
 
         log::info!("Requested device..");
 
-        Ok(Self {
-            window,
-            event_loop,
-            instance,
-            size,
-            surface,
-            adapter,
-            device,
-            queue,
-            backend,
-        })
+        Ok(Self { window, event_loop, instance, size, surface, adapter, device, queue, backend })
     }
 }
 
@@ -140,9 +130,7 @@ impl Window {
             present_mode,
         };
 
-        let swap_chain = display
-            .device
-            .create_swap_chain(&display.surface, &swap_chain_desc);
+        let swap_chain = display.device.create_swap_chain(&display.surface, &swap_chain_desc);
 
         let (vertices, indices) = crate::create_vertices();
 
@@ -157,32 +145,27 @@ impl Window {
         .unwrap();
 
         let texture_bind_group_layout =
-            display
-                .device
-                .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: Some("Texture bind group layout"),
-                    entries: &[
-                        BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: ShaderStage::FRAGMENT,
-                            ty: BindingType::Texture {
-                                multisampled: false,
-                                view_dimension: TextureViewDimension::D2,
-                                sample_type: TextureSampleType::Float { filterable: true },
-                            },
-                            count: None,
+            display.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Texture bind group layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStage::FRAGMENT,
+                        ty: BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: TextureViewDimension::D2,
+                            sample_type: TextureSampleType::Float { filterable: true },
                         },
-                        BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: ShaderStage::FRAGMENT,
-                            ty: BindingType::Sampler {
-                                comparison: false,
-                                filtering: true,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStage::FRAGMENT,
+                        ty: BindingType::Sampler { comparison: false, filtering: true },
+                        count: None,
+                    },
+                ],
+            });
 
         let texture_bind_group = display.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Texture bind group"),
@@ -207,9 +190,7 @@ impl Window {
             mapped_at_creation: false,
         });
 
-        display
-            .queue
-            .write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
+        display.queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
 
         log::info!("Initializing indices..");
         let index_buffer = display.device.create_buffer(&BufferDescriptor {
@@ -219,9 +200,7 @@ impl Window {
             mapped_at_creation: false,
         });
 
-        display
-            .queue
-            .write_buffer(&index_buffer, 0, bytemuck::cast_slice(indices.as_slice()));
+        display.queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(indices.as_slice()));
 
         log::info!("Initializing uniform buffer data..");
         let uniform_buffer = display.device.create_buffer(&BufferDescriptor {
@@ -232,36 +211,27 @@ impl Window {
         });
 
         let uniform = crate::CameraUniform::new(display.size.width, display.size.height);
-        display
-            .queue
-            .write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
+        display.queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
         let uniform_bind_group_layout =
-            display
-                .device
-                .create_bind_group_layout(&BindGroupLayoutDescriptor {
-                    label: Some("Uniform bind group layout"),
-                    entries: &[BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStage::FRAGMENT | ShaderStage::VERTEX,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: BufferSize::new(
-                                size_of::<crate::CameraUniform>() as u64
-                            ),
-                        },
-                        count: None,
-                    }],
-                });
+            display.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Uniform bind group layout"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStage::FRAGMENT | ShaderStage::VERTEX,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: BufferSize::new(size_of::<crate::CameraUniform>() as u64),
+                    },
+                    count: None,
+                }],
+            });
 
         let uniform_bind_group = display.device.create_bind_group(&BindGroupDescriptor {
             label: Some("Camera Bind Group"),
             layout: &uniform_bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() }],
         });
 
         let mut flags = ShaderFlags::VALIDATION;
@@ -286,60 +256,51 @@ impl Window {
         )
         .unwrap();
 
-        log::info!("took {}ms to generate shaders", now.elapsed().as_millis());
-        drop(now);
+        log::info!("took {:#?} to generate shaders", now.elapsed());
 
-        let pipeline_layout = display
-            .device
-            .create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some("Pipeline layout"),
-                bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = display.device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Pipeline layout"),
+            bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         // Create the render pipelines. These describe how the data will flow through the GPU, and what
         // constraints and modifiers it will have.
-        let pipeline = display
-            .device
-            .create_render_pipeline(&RenderPipelineDescriptor {
-                label: Some("Primary pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: VertexState {
-                    module: &vert_module,
-                    entry_point: "main",
-                    // TODO: add objects to the world
-                    buffers: &[VertexBufferLayout {
-                        array_stride: size_of::<crate::Vertex>() as BufferAddress,
-                        step_mode: InputStepMode::Vertex,
-                        attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x2],
-                    }],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &frag_module,
-                    entry_point: "main",
-                    targets: &[wgpu::ColorTargetState {
-                        format: swap_chain_desc.format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent::REPLACE,
-                            alpha: wgpu::BlendComponent::REPLACE,
-                        }),
-                        write_mask: wgpu::ColorWrite::ALL,
-                    }],
-                }),
-                // How the triangles will be rasterized
-                primitive: PrimitiveState {
-                    // type of data we are passing in
-                    topology: PrimitiveTopology::TriangleList,
-                    front_face: FrontFace::Cw,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-            });
+        let pipeline = display.device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Primary pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &vert_module,
+                entry_point: "main",
+                // TODO: add objects to the world
+                buffers: &[VertexBufferLayout {
+                    array_stride: size_of::<crate::Vertex>() as BufferAddress,
+                    step_mode: InputStepMode::Vertex,
+                    attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x2],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &frag_module,
+                entry_point: "main",
+                targets: &[wgpu::ColorTargetState {
+                    format: swap_chain_desc.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent::REPLACE,
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrite::ALL,
+                }],
+            }),
+            // How the triangles will be rasterized
+            primitive: PrimitiveState {
+                // type of data we are passing in
+                topology: PrimitiveTopology::TriangleList,
+                front_face: FrontFace::Cw,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+        });
 
         Self {
             display,
@@ -357,18 +318,12 @@ impl Window {
     }
 
     pub fn redraw(&mut self) {
-        let frame = self.swap_chains[0]
-            .chain
-            .get_current_frame()
-            .unwrap()
-            .output;
+        let frame = self.swap_chains[0].chain.get_current_frame().unwrap().output;
 
         let mut encoder = self
             .display
             .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Primary encoder"),
-            });
+            .create_command_encoder(&CommandEncoderDescriptor { label: Some("Primary encoder") });
 
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: None,
@@ -376,12 +331,7 @@ impl Window {
                 view: &frame.view,
                 resolve_target: None,
                 ops: Operations {
-                    load: LoadOp::Clear(Color {
-                        r: 0.1,
-                        g: 0.5,
-                        b: 0.8,
-                        a: 1.0,
-                    }),
+                    load: LoadOp::Clear(Color { r: 0.1, g: 0.5, b: 0.8, a: 1.0 }),
                     store: true,
                 },
             }],

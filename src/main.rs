@@ -1,6 +1,6 @@
 extern crate nalgebra as na;
 
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_family = "unix")))]
 compile_error!("Renderer can only be build for windows, macos and linux.");
 
 mod events;
@@ -12,6 +12,7 @@ mod texture;
 pub use texture::*;
 mod util;
 pub use util::*;
+mod png;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

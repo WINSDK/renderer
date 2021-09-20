@@ -47,15 +47,12 @@ impl CameraUniform {
         let target = na::Point3::new(0.0, 0.0, 0.0);
 
         // 90 FOV, aspect ratio, near (keep small due to f32 precision), far, (keep small)
-        let proj = na::Perspective3::new(90.0, width as f32 / height as f32, 0.1, 100.0).to_homogeneous();
+        let proj =
+            na::Perspective3::new(90.0, width as f32 / height as f32, 0.1, 100.0).to_homogeneous();
         let view = na::Isometry3::look_at_rh(&eye, &target, &na::Vector3::y());
         let model = na::Isometry3::new(na::Vector3::x(), na::zero());
 
-        Self {
-            proj,
-            view: view.to_homogeneous(),
-            model: model.to_homogeneous(),
-        }
+        Self { proj, view: view.to_homogeneous(), model: model.to_homogeneous() }
     }
 }
 

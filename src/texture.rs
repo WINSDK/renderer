@@ -36,11 +36,8 @@ impl Texture {
         queue: &'a wgpu::Queue,
         swap_chain_desc: &wgpu::SwapChainDescriptor,
     ) -> Result<Texture, io::Error> {
-        let size = wgpu::Extent3d {
-            width: image.width,
-            height: image.height,
-            depth_or_array_layers: 1,
-        };
+        let size =
+            wgpu::Extent3d { width: image.width, height: image.height, depth_or_array_layers: 1 };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             size,
             label: None,
@@ -78,10 +75,6 @@ impl Texture {
             ..Default::default()
         });
 
-        Ok(Self {
-            texture,
-            view,
-            sampler,
-        })
+        Ok(Self { texture, view, sampler })
     }
 }

@@ -35,11 +35,7 @@ pub async fn run(mut window: crate::Window) {
 
     event_loop.run(move |event, _, ref mut control| {
         let window_handle = window.get_window_handle();
-        let mut state = State {
-            control,
-            modifier: None,
-            code: VirtualKeyCode::F24,
-        };
+        let mut state = State { control, modifier: None, code: VirtualKeyCode::F24 };
 
         *state.control = ControlFlow::Poll;
 
@@ -62,9 +58,7 @@ pub async fn run(mut window: crate::Window) {
                         let max = crate::MIN_REAL_SIZE;
                         swap.desc.width = size.width.max(max.width);
                         swap.desc.height = size.height.max(max.height);
-                        swap.chain = display
-                            .device
-                            .create_swap_chain(&display.surface, &swap.desc);
+                        swap.chain = display.device.create_swap_chain(&display.surface, &swap.desc);
                     });
                 }
                 _ => (),
