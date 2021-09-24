@@ -23,11 +23,7 @@ pub struct Png {
 #[inline(always)]
 pub async fn read_png<P: AsRef<Path>>(path: P) -> Result<Png, io::Error> {
     let bytes = tokio::fs::read(&path).await?;
-    eprintln!("{:?}", path.as_ref());
-    assert_eq!(
-        crate::png::Png::new(&bytes).await.unwrap().data,
-        convert_to_png(&bytes).await.unwrap().data
-    );
+    log::info!("reading png from: {:?}", path.as_ref());
     convert_to_png(bytes.as_slice()).await
 }
 

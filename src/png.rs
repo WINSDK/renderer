@@ -15,7 +15,6 @@
 ///
 /// Sample Depth Scaling => mapping of a range of sample values onto the full range of the sample
 /// depth of a PNG image
-
 use std::borrow::Cow;
 use std::convert::TryInto;
 use std::io;
@@ -24,6 +23,7 @@ use std::str::from_utf8;
 
 use async_compression::tokio::write::ZlibDecoder;
 use tokio::{fs, io::AsyncWriteExt};
+use tokio_stream::StreamExt;
 use wgpu::TextureFormat;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,7 +31,13 @@ pub struct Png {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub format: TextureFormat,
+    pub format: Format,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Format {
+    pub texture: TextureFormat,
+    scanline_width: usize,
 }
 
 #[derive(Debug)]
@@ -41,13 +47,36 @@ pub enum Error {
     Unimplimented(Cow<'static, str>),
     Unsupported(Cow<'static, str>),
     IoError(io::Error),
+    Other(Cow<'static, str>),
+}
+
+#[allow(dead_code)]
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq)]
+enum ColorType {
+    GrayScale = 0,
+    Truecolor = 2,
+    Indexed = 3,
+    AlphaGrayScale = 4,
+    AlphaTruecolor = 6,
+}
+
+impl ColorType {
+    fn new(val: u8) -> Result<Self, Error> {
+        // section 3.1.12
+        if [0, 2, 3, 4, 6].contains(&val) {
+            Ok(unsafe { std::mem::transmute(val) })
+        } else {
+            Error::invalid_signature()
+        }
+    }
 }
 
 pub type PngResult = Result<Png, Error>;
 
 impl Png {
     /// WARNING: TextureFormat must match swapchain's TextureFormat
-    pub async fn new(mut data: &[u8]) -> PngResult {
+    pub async fn new(mut data: &mut [u8]) -> PngResult {
         // Check `magic bytes` to evaluate whether the file is a png.
         if &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0xA, 0x1A, 0x0A] != &data[..8] {
             return Error::invalid_signature();
@@ -59,11 +88,12 @@ impl Png {
                 pos += 1;
             }
 
-            &data[pos - 4..] // go back a 4 bytes to include the type
+            &mut data[pos - 4..] // go back a 4 bytes to include the type
         };
 
-        let mut chunks = PngChunks::new(&data);
-        let (ihdr_chunk, chunk_type) = chunks.next().ok_or(Error::CorruptedFile)?;
+        let chunks = PngChunks::new(&mut data);
+        let mut iter = tokio_stream::iter(chunks);
+        let (ihdr_chunk, chunk_type) = iter.next().await.unwrap();
         if chunk_type != "IHDR" {
             return Error::invalid_signature();
         }
@@ -80,7 +110,7 @@ impl Png {
         let height = be_slice_to_u32(&ihdr_chunk[4..8]);
         let (bit_depth, color_type, comp_method, filter_method, inter_method) = {
             let s = ihdr_chunk;
-            (&s[8], &s[9], &s[10], &s[11], &s[12])
+            (&s[8], ColorType::new(s[9])?, &s[10], &s[11], &s[12])
         };
 
         if comp_method != &0 {
@@ -96,19 +126,26 @@ impl Png {
         assert_eq!(filter_method, &0u8);
 
         let mut data: Vec<u8> = {
-            use tokio_stream::StreamExt;
-
             // TODO: predict decoder output
             let mut decoder = ZlibDecoder::new(Vec::with_capacity(((width + 1) * height) as usize));
-            let mut iter = tokio_stream::iter(&mut chunks);
+            let mut palette = None;
 
             while let Some((chunk, chunk_type)) = iter.next().await {
                 match chunk_type {
                     "PLTE" /* palette table */ => {
-                        unimplemented!();
+                        use ColorType::*;
+
+                        // section 11.2.3
+                        assert!(![Truecolor, Indexed, AlphaTruecolor].contains(&color_type));
+                        palette = Some(unsafe { &*(chunk.as_ref() as *const _) });
                     },
                     "IDAT" /* image data chunks */ => {
-                        decoder.write(chunk).await.or_else(Error::ioerror)?;
+                        if let Some(palette) = palette {
+                            decoder.write(&handle_palette(chunk, palette, *bit_depth, &color_type)?
+                                .unwrap_or(chunk.to_vec())).await.or_else(Error::ioerror)?;
+                        } else {
+                            decoder.write(chunk).await.or_else(Error::ioerror)?;
+                        }
                     },
                     _ => {
                         // [image header, textual information]
@@ -124,83 +161,79 @@ impl Png {
             decoder.into_inner()
         };
 
-        if ![0, 2, 3, 4, 6].contains(&color_type) {
-            // section 3.1.12
-            return Error::invalid_signature();
-        }
-
-        // (bit_depth, color_type)
-        let format = match (bit_depth, color_type) {
-            // Grayscale
-            (bits, 0) => match bits {
-                16 => TextureFormat::R16Uint,
-                8 => TextureFormat::R8Uint,
+        let (format, scanline_width) = match (bit_depth, color_type) {
+            (bits, ColorType::GrayScale) => match bits {
+                16 => (TextureFormat::R16Uint, 2),
+                8 => (TextureFormat::R8Uint, 1),
                 4 => {
                     data.iter_mut().for_each(|v| *v *= 15); // 4-bit to 8-bit
-                    TextureFormat::R8Uint
+                    (TextureFormat::R8Uint, 1)
                 }
                 2 => {
                     data.iter_mut().for_each(|v| *v *= 85); // 2-bit to 8-bit
-                    TextureFormat::R8Uint
+                    (TextureFormat::R8Uint, 1)
                 }
                 1 => {
                     data.iter_mut().for_each(|v| *v *= 255); // 1-bit to 8-bit
-                    TextureFormat::R8Uint
+                    (TextureFormat::R8Uint, 1)
                 }
                 _ => panic!("{} is not a valid bit depth", bits),
             },
-            // Truecolor
-            (bits, 2) => {
-                let (format, bytes_per_channel) = match bits {
+            (bits, ColorType::Truecolor) => match bits {
+                16 => (TextureFormat::Rgba16Uint, 6),
+                8 => (TextureFormat::Rgba8Uint, 3),
+                _ => panic!("{} is not a valid bit depth", bits),
+            },
+            (_, ColorType::Indexed) => {
+                return Error::unimplimented("Indexed-colors are not yet supported")
+            }
+            (bits, ColorType::AlphaGrayScale) => match bits {
+                16 => (TextureFormat::Rgba16Uint, 8),
+                8 => (TextureFormat::Rgba8Uint, 4),
+                _ => panic!("{} is not a valid bit depth", bits),
+            },
+            (bits, ColorType::AlphaTruecolor) => {
+                let (format, scanline_width) = match bits {
                     16 => (TextureFormat::Rgba16Uint, 8),
                     8 => (TextureFormat::Rgba8Uint, 4),
                     _ => panic!("{} is not a valid bit depth", bits),
                 };
 
                 let mut pos = 0;
-                let channel_width = bytes_per_channel * width as usize;
+                let channel_width = scanline_width * width as usize;
                 while pos != data.len() {
                     data.remove(pos);
                     pos += channel_width;
                 }
 
-                format
+                (format, scanline_width)
             }
-            // Indexed-color
-            (_, 3) => return Error::unimplimented("Indexed-colors are not yet supported"),
-            // Greyscale with alpha
-            (8, 4) => TextureFormat::Rgba8Uint,
-            (16, 4) => TextureFormat::Rgba16Uint,
-            // Truecolor with alpha
-            (bits, 6) => match bits {
-                8 => TextureFormat::Rgba8Uint,
-                16 => TextureFormat::Rgba16Uint,
-                _ => return Error::invalid_signature(),
-            },
-            _ => return Error::unimplimented("unknown color-type"),
         };
 
         Ok(Self {
             data,
             width,
             height,
-            format,
+            format: Format {
+                texture: format,
+                scanline_width,
+            },
         })
     }
 
     pub async fn from_path<P: AsRef<Path>>(path: P) -> PngResult {
-        let data = fs::read(path).await.map_err(Error::IoError)?;
-        Png::new(data.as_slice()).await
+        let mut data = fs::read(path).await.map_err(Error::IoError)?;
+        Png::new(&mut data).await
     }
 }
 
 struct PngChunks<'png> {
-    slice: &'png [u8],
+    slice: &'png mut [u8],
     pos: usize,
 }
 
 impl<'png> PngChunks<'png> {
-    pub fn new(slice: &'png [u8]) -> impl Iterator<Item = (&'png [u8], &'png str)> {
+    pub fn new(slice: &'png mut [u8]) -> Self {
         if slice.len() < 67 {
             panic!("PNG must be more than 67 bytes");
         }
@@ -210,31 +243,43 @@ impl<'png> PngChunks<'png> {
 }
 
 impl<'png> Iterator for PngChunks<'png> {
-    type Item = (&'png [u8], &'png str);
+    type Item = (&'png mut [u8], &'png str);
 
     fn next(&mut self) -> Option<Self::Item> {
         let (len, chunk_type, data, _checksum) = {
-            let s = &self.slice[self.pos..];
-            let len = be_slice_to_u32(&s[..4]) as usize;
+            // SAFETY: self.slice lasts for at least the life of the struct therefore
+            // any methods on the struct must have valid references.
+            let s = unsafe { &mut (*(self.slice as *mut [u8]))[self.pos..] };
 
-            let chunk_type = from_utf8(&s[4..8]).expect("Failed to parse chunk type");
+            let (meta, data) = s.split_at_mut(8);
+            let len = be_slice_to_u32(&meta[..4]) as usize;
+            let chunk_type = from_utf8(&meta[4..8]).expect("Failed to parse chunk type");
             if chunk_type == "IEND" {
                 return None;
             }
 
             self.pos += 8 + len + 4;
 
-            (
-                len,
-                chunk_type,
-                &s[8..][..len],
-                be_slice_to_u32(&s[len..len + 4]),
-            )
+            let (data, remainder) = data[..len + 4].split_at_mut(len);
+            (len, chunk_type, data, be_slice_to_u32(remainder))
         };
 
         if chunk_type == "IHDR" {
             assert_eq!(len, 13);
             assert_eq!(data.len(), len);
+        }
+
+        match chunk_type {
+            "IHDR" => {
+                assert_eq!(len, 13);
+                assert_eq!(data.len(), len);
+            }
+            "PLTE" => {
+                assert!(len >= 1);
+                assert!(len <= 256 * 3);
+                assert!(len % 3 == 0);
+            }
+            _ => (),
         }
 
         //let mut crc = flate2::Crc::new();
@@ -243,6 +288,44 @@ impl<'png> Iterator for PngChunks<'png> {
 
         //assert_eq!(_checksum, hasher.finalize());
         Some((data, chunk_type))
+    }
+}
+
+fn handle_palette(
+    idat_chunk: &mut [u8],
+    palette: &[u8],
+    bit_depth: u8,
+    color_type: &ColorType,
+) -> Result<Option<Vec<u8>>, Error> {
+    use ColorType::*;
+    assert!(bit_depth >= 8);
+
+    // section 11.2.3
+    match color_type {
+        GrayScale | AlphaGrayScale => return Error::other("Invalid color type for palette"),
+        Truecolor | AlphaTruecolor => {
+            // should probably be using a sPLT
+            Ok(None)
+        }
+        Indexed => {
+            // TODO: do a check for if it's RGBA and set it's associated size.
+            let mut chunk = Vec::with_capacity(idat_chunk.len() * 3);
+
+            let mut pos = 0;
+            for idx in idat_chunk.iter() {
+                let channel_ptr = &palette[(*idx as usize / 3)..];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        channel_ptr.as_ptr(),
+                        chunk[pos..].as_mut_ptr(),
+                        3,
+                    );
+                }
+                pos += 3;
+            }
+
+            Ok(Some(chunk))
+        }
     }
 }
 
@@ -279,6 +362,8 @@ impl Error {
     error_fn!(unsupported, Error::Unsupported, Cow<'static, str>);
 
     error_fn!(ioerror, Error::IoError, io::Error);
+
+    error_fn!(other, Error::Other, Cow<'static, str>);
 }
 
 #[cfg(all(target_family = "unix", test))]
@@ -320,22 +405,19 @@ mod test {
         let bit_depth =
             u32::from_str_radix(info[7].split_terminator('-').next().unwrap(), 10).unwrap();
 
-        assert_eq!(
-            png.format,
-            match (info[8], bit_depth) {
-                ("GrayscaleAlpha" | "Grayscale", 8) => TextureFormat::Rgba8Unorm,
-                ("GrayscaleAlpha" | "Grayscale", 16) => TextureFormat::Rgba16Float,
-                ("RGBA" | "RGB", 16) => TextureFormat::Rgba16Float,
-                ("RGBA" | "RGB", 8) => TextureFormat::Rgba8Unorm,
-                ("Indexed", 8) => unimplemented!("Indexed color is not yet supported"),
-                _ => panic!("Unknown format encountered"),
-            }
-        )
+        assert_eq!(png.format.texture, match (info[8], bit_depth) {
+            ("GrayscaleAlpha" | "Grayscale", 8) => TextureFormat::Rgba8Unorm,
+            ("GrayscaleAlpha" | "Grayscale", 16) => TextureFormat::Rgba16Float,
+            ("RGBA" | "RGB", 16) => TextureFormat::Rgba16Float,
+            ("RGBA" | "RGB", 8) => TextureFormat::Rgba8Unorm,
+            ("Indexed", 8) => unimplemented!("Indexed color is not yet supported"),
+            _ => panic!("Unknown format encountered"),
+        })
     }
 
     #[tokio::test]
     async fn convert_to_png() {
-        let path = Path::new("./res/joe_biden.png");
+        let path = Path::new("./test_cases/joe_biden.png");
         let external_png = crate::read_png(&path).await.unwrap();
         let internal_png = crate::png::Png::from_path(&path).await.unwrap();
         assert_eq!(external_png.data, internal_png.data);
