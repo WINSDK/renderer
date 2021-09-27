@@ -15,7 +15,6 @@ naga = { version = "*", features = ["glsl-in", "spv-out"], optional = true }
 shaderc = { version = "0.7", optional = true }
 
 env_logger = "0.8"
-# crc32fast = "1.2"
 winit = "0.25"
 wgpu = "0.9"
 log = "0.4"
@@ -24,6 +23,10 @@ png = "0.16"
 tokio-stream = "0.1"
 async-compression = { version = "0.3", features = ["tokio", "zlib"] }
 # futures = { version = "0.3", features = ["async-await"] }
+
+[dev-dependencies]
+crc32fast = "1.2"
+rand = "0.8"
 
 [features]
 default = ["shaderc"] # TODO: once shader validation in naga is better make naga the default

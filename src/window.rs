@@ -136,7 +136,7 @@ impl Window {
 
         log::info!("Reading texture and writting to queue..");
         let texture = crate::Texture::new(
-            "./res/joe_biden.png",
+            "./test_cases/joe_biden.png",
             &display.device,
             &display.queue,
             &swap_chain_desc,

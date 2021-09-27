@@ -15,6 +15,7 @@
 ///
 /// Sample Depth Scaling => mapping of a range of sample values onto the full range of the sample
 /// depth of a PNG image
+
 use std::borrow::Cow;
 use std::convert::TryInto;
 use std::io;
@@ -25,6 +26,8 @@ use async_compression::tokio::write::ZlibDecoder;
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_stream::StreamExt;
 use wgpu::TextureFormat;
+
+mod crc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Png {
@@ -37,7 +40,7 @@ pub struct Png {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Format {
     pub texture: TextureFormat,
-    scanline_width: usize,
+    channel_width: usize,
 }
 
 #[derive(Debug)]
@@ -135,13 +138,16 @@ impl Png {
                     "PLTE" /* palette table */ => {
                         use ColorType::*;
 
+                        // PLTE chunks come in only 8-bit grayscale or rgb
+                        assert!(bit_depth >= &8);
+
                         // section 11.2.3
                         assert!(![Truecolor, Indexed, AlphaTruecolor].contains(&color_type));
                         palette = Some(unsafe { &*(chunk.as_ref() as *const _) });
                     },
                     "IDAT" /* image data chunks */ => {
                         if let Some(palette) = palette {
-                            decoder.write(&handle_palette(chunk, palette, *bit_depth, &color_type)?
+                            decoder.write(&handle_palette(chunk, palette, &color_type)?
                                 .unwrap_or(chunk.to_vec())).await.or_else(Error::ioerror)?;
                         } else {
                             decoder.write(chunk).await.or_else(Error::ioerror)?;
@@ -161,7 +167,7 @@ impl Png {
             decoder.into_inner()
         };
 
-        let (format, scanline_width) = match (bit_depth, color_type) {
+        let (format, channel_width) = match (bit_depth, color_type) {
             (bits, ColorType::GrayScale) => match bits {
                 16 => (TextureFormat::R16Uint, 2),
                 8 => (TextureFormat::R8Uint, 1),
@@ -180,12 +186,12 @@ impl Png {
                 _ => panic!("{} is not a valid bit depth", bits),
             },
             (bits, ColorType::Truecolor) => match bits {
-                16 => (TextureFormat::Rgba16Uint, 6),
-                8 => (TextureFormat::Rgba8Uint, 3),
+                16 => (TextureFormat::Rgba16Uint, 8),
+                8 => (TextureFormat::Rgba8Uint, 4),
                 _ => panic!("{} is not a valid bit depth", bits),
             },
             (_, ColorType::Indexed) => {
-                return Error::unimplimented("Indexed-colors are not yet supported")
+                (TextureFormat::Rgba8Uint, 4)
             }
             (bits, ColorType::AlphaGrayScale) => match bits {
                 16 => (TextureFormat::Rgba16Uint, 8),
@@ -193,20 +199,20 @@ impl Png {
                 _ => panic!("{} is not a valid bit depth", bits),
             },
             (bits, ColorType::AlphaTruecolor) => {
-                let (format, scanline_width) = match bits {
+                let (format, channel_width) = match bits {
                     16 => (TextureFormat::Rgba16Uint, 8),
                     8 => (TextureFormat::Rgba8Uint, 4),
                     _ => panic!("{} is not a valid bit depth", bits),
                 };
 
                 let mut pos = 0;
-                let channel_width = scanline_width * width as usize;
+                let scanline_width = channel_width * width as usize;
                 while pos != data.len() {
                     data.remove(pos);
-                    pos += channel_width;
+                    pos += scanline_width;
                 }
 
-                (format, scanline_width)
+                (format, channel_width)
             }
         };
 
@@ -216,7 +222,7 @@ impl Png {
             height,
             format: Format {
                 texture: format,
-                scanline_width,
+                channel_width,
             },
         })
     }
@@ -233,7 +239,7 @@ struct PngChunks<'png> {
 }
 
 impl<'png> PngChunks<'png> {
-    pub fn new(slice: &'png mut [u8]) -> Self {
+    fn new(slice: &'png mut [u8]) -> Self {
         if slice.len() < 67 {
             panic!("PNG must be more than 67 bytes");
         }
@@ -282,11 +288,11 @@ impl<'png> Iterator for PngChunks<'png> {
             _ => (),
         }
 
-        //let mut crc = flate2::Crc::new();
-        //crc.update(chunk_type.as_bytes());
-        //crc.update(data);
+        let mut crc = crc::Hasher::new();
+        crc.update(chunk_type.as_bytes());
+        crc.update(data);
 
-        //assert_eq!(_checksum, hasher.finalize());
+        assert_eq!(_checksum, crc.finalize());
         Some((data, chunk_type))
     }
 }
@@ -294,11 +300,9 @@ impl<'png> Iterator for PngChunks<'png> {
 fn handle_palette(
     idat_chunk: &mut [u8],
     palette: &[u8],
-    bit_depth: u8,
     color_type: &ColorType,
 ) -> Result<Option<Vec<u8>>, Error> {
     use ColorType::*;
-    assert!(bit_depth >= 8);
 
     // section 11.2.3
     match color_type {
@@ -308,20 +312,16 @@ fn handle_palette(
             Ok(None)
         }
         Indexed => {
-            // TODO: do a check for if it's RGBA and set it's associated size.
-            let mut chunk = Vec::with_capacity(idat_chunk.len() * 3);
+            let mut chunk = vec![0; idat_chunk.len() * 4];
 
             let mut pos = 0;
             for idx in idat_chunk.iter() {
-                let channel_ptr = &palette[(*idx as usize / 3)..];
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        channel_ptr.as_ptr(),
-                        chunk[pos..].as_mut_ptr(),
-                        3,
-                    );
-                }
-                pos += 3;
+                let channel = &palette[(*idx as usize / 3)..];
+                chunk[pos] = channel[0];
+                chunk[pos+1] = channel[1];
+                chunk[pos+2] = channel[2];
+                chunk[pos+3] = 0;
+                pos += 4;
             }
 
             Ok(Some(chunk))
