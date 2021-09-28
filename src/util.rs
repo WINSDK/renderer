@@ -1,12 +1,11 @@
 use png::{BitDepth, ColorType};
+use crate::crc::crc32;
 use std::{
     borrow::Cow,
     fmt::Debug,
     io::{self, ErrorKind},
-    mem::size_of,
+    mem::size_of_val,
     path::{Path, PathBuf},
-    collections::hash_map::DefaultHasher,
-    hash::Hasher,
 };
 use tokio::fs;
 use wgpu::{Device, ShaderFlags, ShaderModule, ShaderSource, ShaderStage};
@@ -80,22 +79,18 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
     use tokio::io::AsyncReadExt;
 
     let shader = fs::read(&path).await?;
-    let hash = {
-        let mut hasher = DefaultHasher::new();
-        hasher.write(&shader[4..]);
-        hasher.finish()
-    };
+    let hash = crc32(&shader[4..]);
 
     let mut handle = fs::File::open(&path).await?;
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 4];
 
     handle.read_exact(&mut buf).await?;
 
     // cached shader matches shader source.
-    if hash == u64::from_le_bytes(buf) {
+    if hash == u32::from_le_bytes(buf) {
         use std::convert::TryInto;
 
-        let shader: Vec<u32> = shader[8..] // ignoring the 4 checksum bytes
+        let shader: Vec<u32> = shader[4..] // ignoring the 4 checksum bytes
             .chunks(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
@@ -147,14 +142,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     let binary = spv::write_vec(&module, &analysis, &spv::Options::default())
         .map_err(io::ErrorKind::InvalidData)?;
 
-    let hash = {
-        let mut hasher = DefaultHasher::new();
-        hasher.write(binary.as_binary_u8());
-        hasher.finish()
-    };
-
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of::<u64>());
-    file.extend(u64::to_le_bytes(hash));
+    let hash = crc32(binary.as_binary_u8());
+    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of_val(&hash));
+    file.extend(u32::to_le_bytes(hash));
     file.extend_from_slice(binary.as_binary_u8());
 
     fs::write(create_cache_path(path), file).await?;
@@ -186,14 +176,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         .compile_into_spirv(&src, stage, path.as_ref().to_str().unwrap(), "main", None)
         .unwrap();
 
-    let hash = {
-        let mut hasher = DefaultHasher::new();
-        hasher.write(binary.as_binary_u8());
-        hasher.finish()
-    };
-
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of::<u64>());
-    file.extend(u64::to_le_bytes(hash));
+    let hash = crc32(binary.as_binary_u8());
+    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of_val(&hash));
+    file.extend(u32::to_le_bytes(hash));
     file.extend_from_slice(binary.as_binary_u8());
 
     fs::write(create_cache_path(path), file).await?;

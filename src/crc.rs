@@ -90,6 +90,7 @@ impl<'hash> Hasher<'hash> {
     }
 }
 
+#[allow(dead_code)]
 #[inline(always)]
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = DEFAULT_HASH;

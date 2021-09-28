@@ -22,12 +22,12 @@ use std::io;
 use std::path::Path;
 use std::str::from_utf8;
 
+use crate::crc::Hasher;
+
 use async_compression::tokio::write::ZlibDecoder;
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_stream::StreamExt;
 use wgpu::TextureFormat;
-
-mod crc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Png {
@@ -288,7 +288,7 @@ impl<'png> Iterator for PngChunks<'png> {
             _ => (),
         }
 
-        let mut crc = crc::Hasher::new();
+        let mut crc = Hasher::new();
         crc.update(chunk_type.as_bytes());
         crc.update(data);
 
