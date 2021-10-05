@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     fmt::Debug,
     io::{self, ErrorKind},
-    mem::size_of_val,
+    mem::{size_of, size_of_val},
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -110,9 +110,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     device: &Device,
 ) -> io::Result<ShaderModule> {
     use naga::{
-        back::spv,
-        front::glsl,
-        valid::{ValidationFlags, Validator},
+        back::spv::{self, Options as SpvOptions},
+        front::glsl::{Options as GlslOptions, Parser},
+        valid::{Capabilities, ValidationFlags, Validator},
     };
 
     let stage = match stage {
@@ -122,32 +122,46 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         _ => unreachable!(),
     };
 
-    let src = fs::read_to_string(&path).await?;
     let module = {
-        let mut entry_points = naga::FastHashMap::default();
-        entry_points.insert("main".to_string(), stage);
-        glsl::parse_str(&src, &glsl::Options { entry_points, defines: Default::default() }).unwrap()
+        let src = fs::read_to_string(&path).await?;
+        let mut parser = Parser::default();
+        let module = parser.parse(&GlslOptions::from(stage), &src[..]).unwrap();
+
+        log::info!("parsing shader: {:?}", parser.metadata());
+        module
     };
 
-    let analysis = if cfg!(debug_assertions) {
-        Validator::new(ValidationFlags::all()).validate(&module).unwrap()
+    let mut validator = if cfg!(debug_assertions) {
+        Validator::new(ValidationFlags::all(), Capabilities::empty())
     } else {
-        Validator::new(ValidationFlags::empty()).validate(&module).unwrap()
+        Validator::new(ValidationFlags::empty(), Capabilities::empty())
     };
 
-    let binary = spv::write_vec(&module, &analysis, &spv::Options::default())
-        .map_err(io::ErrorKind::InvalidData)?;
+    let mut binary =
+        spv::write_vec(&module, &validator.validate(&module).unwrap(), &SpvOptions::default())
+            .unwrap();
 
-    let hash = crc32(binary.as_binary_u8());
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of_val(&hash));
+    // SAFETY: use this before create_shader_module as the destructor can be run on the original
+    // vec resulting in the vec pointing to deallocated memory
+    let binary_u8 = unsafe {
+        let width = size_of::<u32>();
+        let len = binary.len() * width;
+        let capacity = binary.capacity() * width;
+        let ptr = binary.as_mut_ptr();
+
+        Vec::from_raw_parts(ptr as *mut u8, len, capacity)
+    };
+
+    let hash = crc32(&binary_u8[..]);
+    let mut file = Vec::with_capacity(binary_u8.len() + size_of_val(&hash));
     file.extend(u32::to_le_bytes(hash));
-    file.extend_from_slice(binary.as_binary_u8());
+    file.extend_from_slice(&binary_u8[..]);
 
     fs::write(create_cache_path(path), file).await?;
 
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
-        source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
+        source: ShaderSource::SpirV(Cow::Borrowed(&binary[..])),
     }))
 }
 
