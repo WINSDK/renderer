@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     fmt::Debug,
     io::{self, ErrorKind},
-    mem::{size_of, size_of_val},
+    mem::{forget, size_of, size_of_val, ManuallyDrop},
     path::{Path, PathBuf},
 };
 use tokio::fs;
@@ -127,7 +127,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         let mut parser = Parser::default();
         let module = parser.parse(&GlslOptions::from(stage), &src[..]).unwrap();
 
-        log::info!("parsing shader: {:?}", parser.metadata());
+        log::info!("compiling shader: {:?}", parser.metadata());
         module
     };
 
@@ -137,9 +137,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         Validator::new(ValidationFlags::empty(), Capabilities::empty())
     };
 
+    let module_info = validator.validate(&module).unwrap();
     let mut binary =
-        spv::write_vec(&module, &validator.validate(&module).unwrap(), &SpvOptions::default())
-            .unwrap();
+        ManuallyDrop::new(spv::write_vec(&module, &module_info, &SpvOptions::default()).unwrap());
 
     // SAFETY: use this before create_shader_module as the destructor can be run on the original
     // vec resulting in the vec pointing to deallocated memory
