@@ -53,12 +53,13 @@ pub async fn run(mut window: crate::Window) {
                     }
                 }
                 WindowEvent::Resized(size) => {
-                    let display = &window.display;
-                    window.swap_chains.iter_mut().for_each(|swap| {
-                        let max = crate::MIN_REAL_SIZE;
-                        swap.desc.width = size.width.max(max.width);
-                        swap.desc.height = size.height.max(max.height);
-                        swap.chain = display.device.create_swap_chain(&display.surface, &swap.desc);
+                    let device = &window.display.device;
+                    let max = crate::MIN_REAL_SIZE;
+
+                    window.surfaces.iter_mut().for_each(|surface| {
+                        surface.config.width = size.width.max(max.width);
+                        surface.config.height = size.height.max(max.height);
+                        surface.handle.configure(&device, &surface.config);
                     });
                 }
                 _ => (),

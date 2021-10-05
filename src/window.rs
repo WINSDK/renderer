@@ -45,7 +45,7 @@ pub struct Display {
     pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
-    pub backend: BackendBit,
+    pub backend: Backends,
 }
 
 impl Display {
@@ -63,9 +63,9 @@ impl Display {
         log::info!("Finished creating window..");
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let backend = BackendBit::VULKAN;
+        let backend = Backends::VULKAN;
         #[cfg(target_os = "macos")]
-        let backend = BackendBit::METAL;
+        let backend = Backends::METAL;
 
         let instance = Instance::new(backend);
         let power_preference = PowerPreference::HighPerformance;
@@ -78,6 +78,12 @@ impl Display {
                 compatible_surface: Some(&surface),
             })
             .await
+            .ok_or(wgpu::RequestDeviceError)?;
+
+        let adapter = instance
+            .enumerate_adapters(backend)
+            .filter(|adapter| surface.get_preferred_format(&adapter).is_some())
+            .next()
             .ok_or(wgpu::RequestDeviceError)?;
 
         let trace_dir = std::env::var("WGPU_TRACE");
@@ -100,7 +106,7 @@ impl Display {
 
 pub struct Window {
     pub display: Display,
-    pub swap_chains: Vec<SwapChains>,
+    pub surfaces: Vec<Surfaces>,
     pub bind_groups: Vec<BindGroups>,
     pub pipelines: Vec<Pipelines>,
     pub uniform_buffers: Vec<Buffer>,
@@ -114,35 +120,34 @@ impl Window {
         let display = Display::new().await.unwrap();
         let mut present_mode = PresentMode::Mailbox;
 
-        if display.backend == BackendBit::METAL {
+        if display.backend == Backends::METAL {
             // TEMP: macos doesn't seem to support MailBox
             present_mode = PresentMode::Fifo;
         }
 
-        let swap_chain_desc = SwapChainDescriptor {
-            usage: TextureUsage::RENDER_ATTACHMENT,
-            format: display
-                .adapter
-                .get_swap_chain_preferred_format(&display.surface)
-                .unwrap_or(TextureFormat::Depth32Float),
-            width: display.size.width,
-            height: display.size.height,
-            present_mode,
+        let (vertices, indices) = crate::create_vertices();
+        log::info!("Reading texture and writting to queue..");
+
+        let surface = {
+            let window_size = display.window.inner_size();
+            let surface = unsafe { display.instance.create_surface(display.window.as_ref()) };
+            let format = surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
+            let config = SurfaceConfiguration {
+                usage: TextureUsages::RENDER_ATTACHMENT,
+                format,
+                present_mode,
+                width: window_size.width,
+                height: window_size.height,
+            };
+
+            surface.configure(&display.device, &config);
+            Surfaces::new(surface, config, format)
         };
 
-        let swap_chain = display.device.create_swap_chain(&display.surface, &swap_chain_desc);
-
-        let (vertices, indices) = crate::create_vertices();
-
-        log::info!("Reading texture and writting to queue..");
-        let texture = crate::Texture::new(
-            "./test_cases/joe_biden.png",
-            &display.device,
-            &display.queue,
-            &swap_chain_desc,
-        )
-        .await
-        .unwrap();
+        let texture =
+            crate::Texture::new("./test_cases/joe_biden.png", &display.device, &display.queue)
+                .await
+                .unwrap();
 
         let texture_bind_group_layout =
             display.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -150,7 +155,7 @@ impl Window {
                 entries: &[
                     BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: ShaderStage::FRAGMENT,
+                        visibility: ShaderStages::FRAGMENT,
                         ty: BindingType::Texture {
                             multisampled: false,
                             view_dimension: TextureViewDimension::D2,
@@ -160,7 +165,7 @@ impl Window {
                     },
                     BindGroupLayoutEntry {
                         binding: 1,
-                        visibility: ShaderStage::FRAGMENT,
+                        visibility: ShaderStages::FRAGMENT,
                         ty: BindingType::Sampler { comparison: false, filtering: true },
                         count: None,
                     },
@@ -186,7 +191,7 @@ impl Window {
         let vertex_buffer = display.device.create_buffer(&BufferDescriptor {
             label: Some("Camera vertex buffer"),
             size: (size_of::<crate::Vertex>() * vertices.len()) as u64,
-            usage: BufferUsage::VERTEX | BufferUsage::COPY_DST,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -196,7 +201,7 @@ impl Window {
         let index_buffer = display.device.create_buffer(&BufferDescriptor {
             label: Some("Camera indices buffer"),
             size: (size_of::<u16>() * indices.len()) as u64,
-            usage: BufferUsage::INDEX | BufferUsage::COPY_DST,
+            usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -206,7 +211,7 @@ impl Window {
         let uniform_buffer = display.device.create_buffer(&BufferDescriptor {
             label: Some("Camera uniform buffer"),
             size: size_of::<crate::CameraUniform>() as u64,
-            usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -218,7 +223,7 @@ impl Window {
                 label: Some("Uniform bind group layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStage::FRAGMENT | ShaderStage::VERTEX,
+                    visibility: ShaderStages::FRAGMENT | ShaderStages::VERTEX,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -234,23 +239,21 @@ impl Window {
             entries: &[BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() }],
         });
 
-        let mut flags = ShaderFlags::VALIDATION;
-        if display.backend == BackendBit::METAL | BackendBit::VULKAN {
-            flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
-        }
+        // let mut flags = ShaderFlags::VALIDATION;
+        // if display.backend == Backends::METAL | Backends::VULKAN {
+        //     flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
+        // }
 
         let now = std::time::Instant::now();
         let (vert_module, frag_module) = tokio::try_join!(
             crate::generate_vulkan_shader_module(
                 "./shaders/cam.glsl",
-                ShaderStage::VERTEX,
-                flags,
+                ShaderStages::VERTEX,
                 &display.device,
             ),
             crate::generate_vulkan_shader_module(
                 "./shaders/cam_frag.glsl",
-                ShaderStage::FRAGMENT,
-                flags,
+                ShaderStages::FRAGMENT,
                 &display.device,
             ),
         )
@@ -275,7 +278,7 @@ impl Window {
                 // TODO: add objects to the world
                 buffers: &[VertexBufferLayout {
                     array_stride: size_of::<crate::Vertex>() as BufferAddress,
-                    step_mode: InputStepMode::Vertex,
+                    step_mode: VertexStepMode::Vertex,
                     attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x2],
                 }],
             },
@@ -283,12 +286,12 @@ impl Window {
                 module: &frag_module,
                 entry_point: "main",
                 targets: &[wgpu::ColorTargetState {
-                    format: swap_chain_desc.format,
+                    format: surface.format,
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent::REPLACE,
                         alpha: wgpu::BlendComponent::REPLACE,
                     }),
-                    write_mask: wgpu::ColorWrite::ALL,
+                    write_mask: wgpu::ColorWrites::ALL,
                 }],
             }),
             // How the triangles will be rasterized
@@ -304,7 +307,7 @@ impl Window {
 
         Self {
             display,
-            swap_chains: SwapChains::new_as_vec(swap_chain, swap_chain_desc),
+            surfaces: vec![surface],
             bind_groups: vec![
                 BindGroups::new(texture_bind_group, texture_bind_group_layout),
                 BindGroups::new(uniform_bind_group, uniform_bind_group_layout),
@@ -318,7 +321,8 @@ impl Window {
     }
 
     pub fn redraw(&mut self) {
-        let frame = self.swap_chains[0].chain.get_current_frame().unwrap().output;
+        let frame = self.surfaces[0].handle.get_current_frame().unwrap().output;
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .display
@@ -328,7 +332,7 @@ impl Window {
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: None,
             color_attachments: &[RenderPassColorAttachment {
-                view: &frame.view,
+                view: &view,
                 resolve_target: None,
                 ops: Operations {
                     load: LoadOp::Clear(Color { r: 0.1, g: 0.5, b: 0.8, a: 1.0 }),
@@ -378,9 +382,10 @@ macro_rules! gen_struct_pair {
 
 }
 
-gen_struct_pair![SwapChains: {
-    chain: SwapChain,
-    desc: SwapChainDescriptor
+gen_struct_pair![Surfaces: {
+    handle: Surface,
+    config: SurfaceConfiguration,
+    format: TextureFormat,
 }];
 
 gen_struct_pair![Pipelines: {

@@ -16,7 +16,7 @@ shaderc = { version = "0.7", optional = true }
 
 env_logger = "0.8"
 winit = "0.25"
-wgpu = "0.9"
+wgpu = { version = "0.10", features = ["spirv"] }
 log = "0.4"
 png = "0.16"
 

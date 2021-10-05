@@ -15,7 +15,6 @@
 ///
 /// Sample Depth Scaling => mapping of a range of sample values onto the full range of the sample
 /// depth of a PNG image
-
 use std::borrow::Cow;
 use std::convert::TryInto;
 use std::io;
@@ -26,7 +25,7 @@ use crate::crc::Hasher;
 
 use async_compression::tokio::write::ZlibDecoder;
 use tokio::{fs, io::AsyncWriteExt};
-use tokio_stream::StreamExt;
+use tokio_stream::{self as stream, StreamExt};
 use wgpu::TextureFormat;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -95,7 +94,7 @@ impl Png {
         };
 
         let chunks = PngChunks::new(&mut data);
-        let mut iter = tokio_stream::iter(chunks);
+        let mut iter = stream::iter(chunks);
         let (ihdr_chunk, chunk_type) = iter.next().await.unwrap();
         if chunk_type != "IHDR" {
             return Error::invalid_signature();
@@ -190,9 +189,7 @@ impl Png {
                 8 => (TextureFormat::Rgba8Uint, 4),
                 _ => panic!("{} is not a valid bit depth", bits),
             },
-            (_, ColorType::Indexed) => {
-                (TextureFormat::Rgba8Uint, 4)
-            }
+            (_, ColorType::Indexed) => (TextureFormat::Rgba8Uint, 4),
             (bits, ColorType::AlphaGrayScale) => match bits {
                 16 => (TextureFormat::Rgba16Uint, 8),
                 8 => (TextureFormat::Rgba8Uint, 4),
@@ -216,15 +213,7 @@ impl Png {
             }
         };
 
-        Ok(Self {
-            data,
-            width,
-            height,
-            format: Format {
-                texture: format,
-                channel_width,
-            },
-        })
+        Ok(Self { data, width, height, format: Format { texture: format, channel_width } })
     }
 
     pub async fn from_path<P: AsRef<Path>>(path: P) -> PngResult {
@@ -253,8 +242,9 @@ impl<'png> Iterator for PngChunks<'png> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (len, chunk_type, data, _checksum) = {
-            // SAFETY: self.slice lasts for at least the life of the struct therefore
-            // any methods on the struct must have valid references.
+            // SAFETY: every call to next() returns references to parts
+            // of the slice that do not overlap, you're never reading or
+            // writting from the same chunk of the slice.
             let s = unsafe { &mut (*(self.slice as *mut [u8]))[self.pos..] };
 
             let (meta, data) = s.split_at_mut(8);
@@ -275,6 +265,7 @@ impl<'png> Iterator for PngChunks<'png> {
             assert_eq!(data.len(), len);
         }
 
+        #[cfg(debug_assertions)]
         match chunk_type {
             "IHDR" => {
                 assert_eq!(len, 13);
@@ -318,9 +309,9 @@ fn handle_palette(
             for idx in idat_chunk.iter() {
                 let channel = &palette[(*idx as usize / 3)..];
                 chunk[pos] = channel[0];
-                chunk[pos+1] = channel[1];
-                chunk[pos+2] = channel[2];
-                chunk[pos+3] = 0;
+                chunk[pos + 1] = channel[1];
+                chunk[pos + 2] = channel[2];
+                chunk[pos + 3] = 0;
                 pos += 4;
             }
 

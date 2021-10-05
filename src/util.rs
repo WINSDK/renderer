@@ -1,5 +1,5 @@
-use png::{BitDepth, ColorType};
 use crate::crc::crc32;
+use png::{BitDepth, ColorType};
 use std::{
     borrow::Cow,
     fmt::Debug,
@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::fs;
-use wgpu::{Device, ShaderFlags, ShaderModule, ShaderSource, ShaderStage};
+use wgpu::{Device, ShaderModule, ShaderSource, ShaderStages};
 
 pub struct Png {
     pub data: Vec<u8>,
@@ -46,15 +46,14 @@ pub async fn convert_to_png(bytes: &[u8]) -> Result<Png, io::Error> {
 
 pub async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     path: P,
-    stage: ShaderStage,
-    flags: ShaderFlags,
+    stage: ShaderStages,
     device: &Device,
 ) -> io::Result<ShaderModule> {
     log::info!("Reading shader from: {:?}", path);
     let cache_path = create_cache_path(&path);
 
-    match shader_checksum(&cache_path, flags, device).await {
-        Err(_) => compile_shader(path, stage, flags, device).await,
+    match shader_checksum(&cache_path, device).await {
+        Err(_) => compile_shader(path, stage, device).await,
         Ok(shader) => Ok(shader),
     }
 }
@@ -73,7 +72,6 @@ fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
 /// checks if shader is already cached, if so returns a ShaderModule
 async fn shader_checksum<P: AsRef<Path> + Debug>(
     path: P,
-    flags: ShaderFlags,
     device: &Device,
 ) -> io::Result<ShaderModule> {
     use tokio::io::AsyncReadExt;
@@ -99,7 +97,6 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
         Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: None,
             source: ShaderSource::SpirV(Cow::Borrowed(shader.as_slice())),
-            flags,
         }))
     } else {
         Err(io::ErrorKind::NotFound.into())
@@ -109,8 +106,7 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
 #[cfg(not(feature = "shaderc"))]
 async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
-    stage: ShaderStage,
-    flags: ShaderFlags,
+    stage: ShaderStages,
     device: &Device,
 ) -> io::Result<ShaderModule> {
     use naga::{
@@ -120,9 +116,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     };
 
     let stage = match stage {
-        ShaderStage::COMPUTE => naga::ShaderStage::Compute,
-        ShaderStage::VERTEX => naga::ShaderStage::Vertex,
-        ShaderStage::FRAGMENT => naga::ShaderStage::Fragment,
+        ShaderStages::COMPUTE => naga::ShaderStage::Compute,
+        ShaderStages::VERTEX => naga::ShaderStage::Vertex,
+        ShaderStages::FRAGMENT => naga::ShaderStage::Fragment,
         _ => unreachable!(),
     };
 
@@ -152,21 +148,19 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
-        flags,
     }))
 }
 
 #[cfg(feature = "shaderc")]
 async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
-    stage: ShaderStage,
-    flags: ShaderFlags,
+    stage: ShaderStages,
     device: &Device,
 ) -> io::Result<ShaderModule> {
     let stage = match stage {
-        ShaderStage::COMPUTE => shaderc::ShaderKind::Compute,
-        ShaderStage::VERTEX => shaderc::ShaderKind::Vertex,
-        ShaderStage::FRAGMENT => shaderc::ShaderKind::Fragment,
+        ShaderStages::COMPUTE => shaderc::ShaderKind::Compute,
+        ShaderStages::VERTEX => shaderc::ShaderKind::Vertex,
+        ShaderStages::FRAGMENT => shaderc::ShaderKind::Fragment,
         _ => unreachable!(), // can't have unreachable_unchecked() in case of accidental use VERTEX_FRAGMENT
     };
 
@@ -186,6 +180,5 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
-        flags,
     }))
 }

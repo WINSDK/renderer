@@ -45,11 +45,7 @@ pub struct Hasher<'hash> {
 
 impl<'hash> Hasher<'hash> {
     pub fn new() -> Self {
-        Hasher {
-            stack_stream: [&[]; 32],
-            heap_stream: Vec::new(),
-            len: 0,
-        }
+        Hasher { stack_stream: [&[]; 32], heap_stream: Vec::new(), len: 0 }
     }
 
     #[inline]
@@ -73,11 +69,8 @@ impl<'hash> Hasher<'hash> {
             return DEFAULT_HASH;
         }
 
-        let streams = if self.len > STACK_SIZE {
-            &self.heap_stream[..]
-        } else {
-            &self.stack_stream[..]
-        };
+        let streams =
+            if self.len > STACK_SIZE { &self.heap_stream[..] } else { &self.stack_stream[..] };
 
         let mut crc: u32 = DEFAULT_HASH;
         for stream in &streams[..self.len] {
