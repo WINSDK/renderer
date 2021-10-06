@@ -367,7 +367,7 @@ mod test {
         use std::process::{Command, Stdio};
         use wgpu::TextureFormat;
 
-        let path = Path::new("./res/joe_biden.png");
+        let path = Path::new("./test_cases/joe_biden.png");
         let png = Png::from_path(path).await.unwrap();
 
         let output = {
@@ -397,11 +397,10 @@ mod test {
             u32::from_str_radix(info[7].split_terminator('-').next().unwrap(), 10).unwrap();
 
         assert_eq!(png.format.texture, match (info[8], bit_depth) {
-            ("GrayscaleAlpha" | "Grayscale", 8) => TextureFormat::Rgba8Unorm,
-            ("GrayscaleAlpha" | "Grayscale", 16) => TextureFormat::Rgba16Float,
-            ("RGBA" | "RGB", 16) => TextureFormat::Rgba16Float,
-            ("RGBA" | "RGB", 8) => TextureFormat::Rgba8Unorm,
-            ("Indexed", 8) => unimplemented!("Indexed color is not yet supported"),
+            ("GrayscaleAlpha" | "Grayscale", 8) => TextureFormat::Rgba8Uint,
+            ("GrayscaleAlpha" | "Grayscale", 16) => TextureFormat::Rgba16Uint,
+            ("RGBA" | "RGB", 16) => TextureFormat::Rgba16Uint,
+            ("RGBA" | "RGB", 8) => TextureFormat::Rgba8Uint,
             _ => panic!("Unknown format encountered"),
         })
     }

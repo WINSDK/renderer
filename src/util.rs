@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     fmt::Debug,
     io::{self, ErrorKind},
-    mem::{forget, size_of, size_of_val, ManuallyDrop},
+    mem::{size_of, size_of_val, ManuallyDrop},
     path::{Path, PathBuf},
 };
 use tokio::fs;

@@ -68,18 +68,9 @@ impl Display {
         let backend = Backends::METAL;
 
         let instance = Instance::new(backend);
-        let power_preference = PowerPreference::HighPerformance;
 
         let size = window.inner_size();
         let surface = unsafe { instance.create_surface(window.clone().as_ref()) };
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .ok_or(wgpu::RequestDeviceError)?;
-
         let adapter = instance
             .enumerate_adapters(backend)
             .filter(|adapter| surface.get_preferred_format(&adapter).is_some())
@@ -131,7 +122,8 @@ impl Window {
         let surface = {
             let window_size = display.window.inner_size();
             let surface = unsafe { display.instance.create_surface(display.window.as_ref()) };
-            let format = surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
+            let format =
+                surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
             let config = SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
