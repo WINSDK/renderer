@@ -35,7 +35,8 @@ const CRCTAB: [u32; 256] = [
 ];
 
 const DEFAULT_HASH: u32 = 0xffffffff;
-const STACK_SIZE: usize = 32;
+const STACK_SIZE: usize = 64;
+const CRC_BITS: usize = 32;
 
 pub struct Hasher<'hash> {
     stack_stream: [&'hash [u8]; STACK_SIZE],
@@ -45,11 +46,15 @@ pub struct Hasher<'hash> {
 
 impl<'hash> Hasher<'hash> {
     pub fn new() -> Self {
-        Hasher { stack_stream: [&[]; 32], heap_stream: Vec::new(), len: 0 }
+        Hasher {
+            stack_stream: [&[]; STACK_SIZE],
+            heap_stream: Vec::new(),
+            len: 0,
+        }
     }
 
     #[inline]
-    pub fn update(&mut self, data: &'hash [u8]) {
+    fn push_stream(&mut self, data: &'hash [u8]) {
         if self.len >= STACK_SIZE {
             if self.len == STACK_SIZE {
                 self.heap_stream = self.stack_stream.to_vec();
@@ -63,16 +68,41 @@ impl<'hash> Hasher<'hash> {
         self.len += 1;
     }
 
-    // Calculates current crc32 hash, takes &self as the hash can continue to be updated.
-    pub fn finalize(&self) -> u32 {
+    #[inline]
+    pub fn update(&mut self, data: &'hash [u8]) {
+        const CHUNK_SIZE: usize = 128;
+
+        // TODO: if there are exactly 32 elements at this point,
+        // will do 2 allocates instead of one.
+        if self.len >= STACK_SIZE {
+            let size = (data.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
+            self.heap_stream.reserve(size);
+        }
+
+        for chunk in data.chunks(CHUNK_SIZE) {
+            self.push_stream(chunk);
+        }
+    }
+
+    /// Calculates current crc32 hash, takes &self as the hash can continue to be updated.
+    pub async fn finalize(&self) -> u32 {
+        // use tokio_stream::{self as stream, StreamExt};
+
         if self.len == 0 {
             return DEFAULT_HASH;
         }
 
-        let streams =
-            if self.len > STACK_SIZE { &self.heap_stream[..] } else { &self.stack_stream[..] };
+        let streams = if self.len > STACK_SIZE {
+            &self.heap_stream[..]
+        } else {
+            &self.stack_stream[..]
+        };
 
+        // keep sync for now until merging crc32's is implemented
+        // let mut streams = stream::iter(&streams[..self.len]);
         let mut crc: u32 = DEFAULT_HASH;
+
+        //for stream in streams.next().await {
         for stream in &streams[..self.len] {
             for byte in *stream {
                 crc = CRCTAB[((crc ^ *byte as u32) & 0xff) as usize] ^ (crc >> 8);
@@ -83,8 +113,7 @@ impl<'hash> Hasher<'hash> {
     }
 }
 
-#[allow(dead_code)]
-#[inline(always)]
+#[inline]
 pub fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = DEFAULT_HASH;
     for byte in data {
@@ -94,12 +123,76 @@ pub fn crc32(data: &[u8]) -> u32 {
     crc ^ !0
 }
 
+/// Merge two's CRC32 such that result = crc32(dataB, lengthB, crc32(dataA, lengthA))
+fn crc32_combine(mut acrc: u32, bcrc: u32, mut blen: usize) -> u32 {
+    // based on Jean-loup Gailly and Mark Adler's crc_combine from
+    // https://github.com/madler/zlib/blob/master/crc32.c
+
+    // degenerated case
+    if blen == 0 {
+        return acrc;
+    }
+
+    let mut odd = [0u32; CRC_BITS]; // odd-power-of-two zeros operator
+    let mut even = [0u32; CRC_BITS]; // even-power-of-two zeros operator
+
+    // put operator for one zero bit in odd
+    odd[0] = 0xEDB88320; // CRC-32 polynomial
+    let mut row = 1;
+    for idx in 1..CRC_BITS {
+        odd[idx] = row;
+        row <<= 1;
+    }
+
+    // put operator for two zero bits in even
+    for (square, mat) in even.iter_mut().zip(odd) {
+        *square = gf2_matrix_times(&odd, mat);
+    }
+
+    // put operator for four zero bits in odd
+    for (square, mat) in odd.iter_mut().zip(even) {
+        *square = gf2_matrix_times(&even, mat);
+    }
+
+    let even = &mut even;
+    let odd = &mut odd;
+    while blen != 0 {
+        for (square, mat) in even.iter_mut().zip(odd.iter()) {
+            *square = gf2_matrix_times(&odd, *mat);
+        }
+
+        if (blen & 1) != 0 {
+            acrc = gf2_matrix_times(&even, acrc);
+        }
+
+        blen >>= 1;
+        std::mem::swap(even, odd);
+    }
+
+    acrc ^ bcrc
+}
+
+#[inline]
+fn gf2_matrix_times(mat: &[u32; CRC_BITS], mut vec: u32) -> u32 {
+    let (mut sum, mut idx) = (0, 0);
+    while vec != 0 {
+        if (vec & 1) != 0 {
+            sum ^= mat[idx];
+        }
+
+        vec >>= 1;
+        idx += 1;
+    }
+
+    sum
+}
+
 #[cfg(test)]
 mod test {
     use rand::{thread_rng, Rng};
 
-    #[test]
-    fn crc32() {
+    #[tokio::test]
+    async fn crc32() {
         let random_data = {
             let mut rng = thread_rng();
             vec![rng.gen::<u8>(); 1024]
@@ -115,57 +208,49 @@ mod test {
         assert_eq!(base_hash, super::crc32(random_data.as_slice()))
     }
 
-    #[test]
-    fn crc32_hasher() {
-        let random_data = {
-            let mut rng = thread_rng();
-            [vec![rng.gen::<u8>(); 1024], vec![rng.gen::<u8>(); 1024]]
-        };
+    #[tokio::test]
+    async fn crc32_hasher() {
+        let mut rng = thread_rng();
+        let (mut base_hasher, mut impl_hasher) = (crc32fast::Hasher::new(), super::Hasher::new());
 
-        let base_hash = {
-            let mut hasher = crc32fast::Hasher::new();
+        let sample_data = [64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
+        for sample in sample_data.iter() {
+            base_hasher.update(sample);
+            impl_hasher.update(sample);
+        }
 
-            hasher.update(random_data[0].as_slice());
-            hasher.update(random_data[1].as_slice());
-            hasher.finalize()
-        };
-
-        let impl_hash = {
-            let mut hasher = super::Hasher::new();
-
-            hasher.update(random_data[0].as_slice());
-            hasher.update(random_data[1].as_slice());
-            hasher.finalize()
-        };
-
-        assert_eq!(base_hash, impl_hash)
+        assert_eq!(base_hasher.finalize(), impl_hasher.finalize().await)
     }
 
-    #[test]
-    fn crc32_hasher_alloc() {
-        let random_data: Vec<Vec<u8>> = {
-            let mut rng = thread_rng();
-            (0..64).map(|_| vec![rng.gen::<u8>(); 128]).collect()
-        };
+    #[tokio::test]
+    async fn crc32_join() {
+        let mut rng = thread_rng();
+        let sample = vec![rng.gen::<u8>(); rng.gen_range(128..1024)];
 
-        let base_hash = {
-            let mut hasher = crc32fast::Hasher::new();
-            for data in random_data.iter() {
-                hasher.update(data.as_slice());
-            }
+        let (left, right) = sample.split_at(rng.gen_range(1..sample.len()));
+        let (left_crc, right_crc) = (super::crc32(left), super::crc32(right));
 
-            hasher.finalize()
-        };
+        assert_eq!(
+            super::crc32(&sample[..]),
+            super::crc32_combine(left_crc, right_crc, right.len())
+        )
+    }
 
-        let impl_hash = {
-            let mut hasher = super::Hasher::new();
-            for data in random_data.iter() {
-                hasher.update(data.as_slice());
-            }
+    #[tokio::test]
+    async fn binary_chunk_tree() {
+        use super::*;
 
-            hasher.finalize()
-        };
+        let mut rng = thread_rng();
+        let sample = vec![rng.gen::<u8>(); 512];
 
-        assert_eq!(base_hash, impl_hash)
+        let (a, b, c, d) = (
+            crc32(&sample[0..128]),
+            crc32(&sample[128..256]),
+            crc32(&sample[256..384]),
+            crc32(&sample[384..512]),
+        );
+
+        let (e, f) = (crc32_combine(a, b, 128), crc32_combine(c, d, 128));
+        assert_eq!(crc32_combine(e, f, 256), crc32(&sample[..]));
     }
 }
