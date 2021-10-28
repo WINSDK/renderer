@@ -1,3 +1,6 @@
+use futures::stream::FuturesOrdered;
+use std::sync::atomic::{AtomicU32, Ordering};
+
 // Algorithm based on Adler-32, full credits to the former go to Mark Adler.
 const CRCTAB: [u32; 256] = [
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535, 0x9e6495a3,
@@ -38,87 +41,247 @@ const DEFAULT_HASH: u32 = 0xffffffff;
 const STACK_SIZE: usize = 64;
 const CRC_BITS: usize = 32;
 
-pub struct Hasher<'hash> {
-    stack_stream: [&'hash [u8]; STACK_SIZE],
-    heap_stream: Vec<&'hash [u8]>,
-    len: usize,
+struct Chunk<'hash> {
+    bytes: &'hash [u8],
+    crc: AtomicU32,
+}
+
+pub struct Hasher<'item> {
+    streams: Vec<Chunk<'item>>,
 }
 
 impl<'hash> Hasher<'hash> {
     pub fn new() -> Self {
-        Hasher {
-            stack_stream: [&[]; STACK_SIZE],
-            heap_stream: Vec::new(),
-            len: 0,
-        }
+        Hasher { streams: Vec::new() }
     }
 
     #[inline]
-    fn push_stream(&mut self, data: &'hash [u8]) {
-        if self.len >= STACK_SIZE {
-            if self.len == STACK_SIZE {
-                self.heap_stream = self.stack_stream.to_vec();
-            }
+    pub async fn update(&mut self, data: &'hash [u8]) {
+        const CHUNK_SIZE: usize = 512;
+        let size = (data.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
 
-            self.heap_stream.push(data);
-        } else {
-            self.stack_stream[self.len] = data;
-        }
+        self.streams.reserve(size);
 
-        self.len += 1;
-    }
+        // assert that the chunk order number (initial crc in this case) doesn't overflow
+        assert!(size + self.streams.len() <= u32::MAX as usize);
 
-    #[inline]
-    pub fn update(&mut self, data: &'hash [u8]) {
-        const CHUNK_SIZE: usize = 128;
-
-        // TODO: if there are exactly 32 elements at this point,
-        // will do 2 allocates instead of one.
-        if self.len >= STACK_SIZE {
-            let size = (data.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
-            self.heap_stream.reserve(size);
-        }
-
-        for chunk in data.chunks(CHUNK_SIZE) {
-            self.push_stream(chunk);
+        for (idx, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+            self.streams.push(Chunk { bytes: chunk, crc: AtomicU32::new(idx as u32) })
         }
     }
 
     /// Calculates current crc32 hash, takes &self as the hash can continue to be updated.
-    pub async fn finalize(&self) -> u32 {
-        // use tokio_stream::{self as stream, StreamExt};
+    pub async fn finalize(&mut self) -> u32 {
+        use futures::stream::StreamExt;
 
-        if self.len == 0 {
-            return DEFAULT_HASH;
+        match self.streams.len() {
+            0 => return DEFAULT_HASH,
+            1 => return crc32_impl(DEFAULT_HASH, self.streams[0].bytes),
+            _ => {}
         }
 
-        let streams = if self.len > STACK_SIZE {
-            &self.heap_stream[..]
-        } else {
-            &self.stack_stream[..]
-        };
-
-        // keep sync for now until merging crc32's is implemented
-        // let mut streams = stream::iter(&streams[..self.len]);
-        let mut crc: u32 = DEFAULT_HASH;
-
-        //for stream in streams.next().await {
-        for stream in &streams[..self.len] {
-            for byte in *stream {
-                crc = CRCTAB[((crc ^ *byte as u32) & 0xff) as usize] ^ (crc >> 8);
-            }
+        let mut futures = FuturesOrdered::new();
+        for stream in self.streams.iter() {
+            let bytes = (&stream.bytes) as *const _;
+            futures.push(async move { crc32_sync(unsafe { *bytes }) })
         }
 
-        crc ^ !0
+        let crc = AtomicU32::new(DEFAULT_HASH);
+        let mut streams = self.streams.iter().skip(1);
+        while let Some(new) = futures.next().await {
+            match streams.next() {
+                Some(next) => {
+                    let len_next = next.bytes.len();
+                    let crc_next = crc32_combine(crc.load(Ordering::Acquire), new, len_next);
+                    crc.store(crc_next, Ordering::Release);
+                }
+                None => break,
+            };
+        }
+
+        crc.load(Ordering::SeqCst) ^ !0
     }
 }
 
 #[inline]
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = DEFAULT_HASH;
+pub fn crc32_sync(data: &[u8]) -> u32 {
+    crc32_sync_impl(DEFAULT_HASH, data)
+}
+
+#[inline]
+pub async fn crc32(data: &[u8]) -> u32 {
+    let mut hasher = Hasher::new();
+    hasher.update(data).await;
+    hasher.finalize().await
+}
+
+#[inline]
+fn crc32_sync_impl(crc: u32, data: &[u8]) -> u32 {
+    #[cfg(target_feature = "sse2")]
+    unsafe {
+        crc32_simd_impl(crc, data)
+    }
+    #[cfg(not(target_feature = "sse2"))]
+    crc32_sync_impl(crc, data)
+}
+
+#[inline]
+fn crc32_impl(mut crc: u32, data: &[u8]) -> u32 {
+    if data.len() == 0 {
+        return crc;
+    }
+
     for byte in data {
         crc = CRCTAB[((crc ^ *byte as u32) & 0xff) as usize] ^ (crc >> 8);
     }
+
+    crc ^ !0
+}
+
+unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
+    // based on the http://intel.ly/2ySEwL0 paper
+    use crate::intrinsics::*;
+
+    // Buffer has to be at least 64 bytes and a multiple of 16...
+    if data.len() < 64 {
+        return crc32_impl(DEFAULT_HASH, data);
+    }
+
+    let remainder = {
+        let remainder = data.len() % 16;
+        if remainder == 0 {
+            None
+        } else {
+            data = &data[..data.len() - remainder];
+            Some(&data[data.len() - remainder..])
+        }
+    };
+
+    // CRC32+Barrett polynomials.
+    const K1K2: [u64; 2] = [0x0154442bd4, 0x01c6e41596];
+    const K3K4: [u64; 2] = [0x01751997d0, 0x00ccaa009e];
+    const K5K0: [u64; 2] = [0x0163cd6124, 0x0000000000];
+    const POLY: [u64; 2] = [0x01db710641, 0x01f7011641];
+
+    let (
+        mut x0,
+        mut x1,
+        mut x2,
+        mut x3,
+        mut x4,
+        mut x5,
+        mut x6,
+        mut x7,
+        mut x8,
+        mut y5,
+        mut y6,
+        mut y7,
+        mut y8,
+    );
+
+    // there's at least one block of 64.
+    x1 = _mm_loadu_si128(data.as_ptr().offset(0x00) as *const __m128i);
+    x2 = _mm_loadu_si128(data.as_ptr().offset(0x10) as *const __m128i);
+    x3 = _mm_loadu_si128(data.as_ptr().offset(0x20) as *const __m128i);
+    x4 = _mm_loadu_si128(data.as_ptr().offset(0x30) as *const __m128i);
+
+    x1 = _mm_xor_si128(x1, _mm_cvtsi32_si128(crc as i32));
+    x0 = _mm_load_si128(K1K2.as_ptr() as *const __m128i);
+
+    data = &data[64..];
+
+    // parallel fold blocks of 64, if any.
+    while data.len() >= 64 {
+        x5 = _mm_clmulepi64_si128::<0x00>(x1, x0);
+        x6 = _mm_clmulepi64_si128::<0x00>(x2, x0);
+        x7 = _mm_clmulepi64_si128::<0x00>(x3, x0);
+        x8 = _mm_clmulepi64_si128::<0x00>(x4, x0);
+
+        x1 = _mm_clmulepi64_si128::<0x11>(x1, x0);
+        x2 = _mm_clmulepi64_si128::<0x11>(x2, x0);
+        x3 = _mm_clmulepi64_si128::<0x11>(x3, x0);
+        x4 = _mm_clmulepi64_si128::<0x11>(x4, x0);
+
+        y5 = _mm_loadu_si128(data.as_ptr().offset(0x10) as *const __m128i);
+        y6 = _mm_loadu_si128(data.as_ptr().offset(0x10) as *const __m128i);
+        y7 = _mm_loadu_si128(data.as_ptr().offset(0x20) as *const __m128i);
+        y8 = _mm_loadu_si128(data.as_ptr().offset(0x30) as *const __m128i);
+
+        x1 = _mm_xor_si128(x1, x5);
+        x2 = _mm_xor_si128(x2, x6);
+        x3 = _mm_xor_si128(x3, x7);
+        x4 = _mm_xor_si128(x4, x8);
+
+        x1 = _mm_xor_si128(x1, y5);
+        x2 = _mm_xor_si128(x2, y6);
+        x3 = _mm_xor_si128(x3, y7);
+        x4 = _mm_xor_si128(x4, y8);
+
+        data = &data[64..];
+    }
+
+    // fold into 128-bits.
+    x0 = _mm_load_si128(K3K4.as_ptr() as *const __m128i);
+
+    x5 = _mm_clmulepi64_si128::<0x00>(x1, x0);
+    x1 = _mm_clmulepi64_si128::<0x11>(x1, x0);
+    x1 = _mm_xor_si128(x1, x2);
+    x1 = _mm_xor_si128(x1, x5);
+
+    x5 = _mm_clmulepi64_si128::<0x00>(x1, x0);
+    x1 = _mm_clmulepi64_si128::<0x11>(x1, x0);
+    x1 = _mm_xor_si128(x1, x3);
+    x1 = _mm_xor_si128(x1, x5);
+
+    x5 = _mm_clmulepi64_si128::<0x00>(x1, x0);
+    x1 = _mm_clmulepi64_si128::<0x11>(x1, x0);
+    x1 = _mm_xor_si128(x1, x4);
+    x1 = _mm_xor_si128(x1, x5);
+
+    // single fold blocks of 16, if any.
+    while data.len() >= 16 {
+        x2 = _mm_loadu_si128(data.as_ptr() as *const __m128i);
+
+        x5 = _mm_clmulepi64_si128::<0x00>(x1, x0);
+        x1 = _mm_clmulepi64_si128::<0x11>(x1, x0);
+        x1 = _mm_xor_si128(x1, x2);
+        x1 = _mm_xor_si128(x1, x5);
+
+        data = &data[16..];
+    }
+
+    // fold 128-bits to 64-bits.
+    x2 = _mm_clmulepi64_si128::<0x10>(x1, x0);
+    x3 = _mm_setr_epi32(!0, 0, !0, 0);
+    x1 = _mm_srli_si128::<8>(x1);
+    x1 = _mm_xor_si128(x1, x2);
+
+    x0 = _mm_loadl_epi64(K5K0.as_ptr() as *const __m128i);
+
+    x2 = _mm_srli_si128::<4>(x1);
+    x1 = _mm_and_si128(x1, x3);
+    x1 = _mm_clmulepi64_si128::<0x00>(x1, x0);
+    x1 = _mm_xor_si128(x1, x2);
+
+    // barret reduce to 32-bits.
+    x0 = _mm_load_si128(POLY.as_ptr() as *const __m128i);
+
+    x2 = _mm_and_si128(x1, x3);
+    x2 = _mm_clmulepi64_si128::<0x10>(x2, x0);
+    x2 = _mm_and_si128(x2, x3);
+    x2 = _mm_clmulepi64_si128::<0x00>(x2, x0);
+    x1 = _mm_xor_si128(x1, x2);
+
+    let mut crc = _mm_extract_epi32::<1>(x1) as u32;
+    let crc = if let Some(bytes) = remainder {
+        for byte in bytes {
+            crc = CRCTAB[((crc ^ *byte as u32) & 0xff) as usize] ^ (crc >> 8);
+        }
+
+        crc
+    } else {
+        crc
+    };
 
     crc ^ !0
 }
@@ -187,12 +350,21 @@ fn gf2_matrix_times(mat: &[u32; CRC_BITS], mut vec: u32) -> u32 {
     sum
 }
 
+#[inline]
+fn log2(val: usize) -> usize {
+    unsafe {
+        let res: usize;
+        asm!("bsr eax, edi", out("eax") res, in("edi") val);
+        res
+    }
+}
+
 #[cfg(test)]
 mod test {
     use rand::{thread_rng, Rng};
 
-    #[tokio::test]
-    async fn crc32() {
+    #[test]
+    fn crc32() {
         let random_data = {
             let mut rng = thread_rng();
             vec![rng.gen::<u8>(); 1024]
@@ -205,7 +377,7 @@ mod test {
             hasher.finalize()
         };
 
-        assert_eq!(base_hash, super::crc32(random_data.as_slice()))
+        assert_eq!(base_hash, super::crc32_sync(random_data.as_slice()))
     }
 
     #[tokio::test]
@@ -216,24 +388,143 @@ mod test {
         let sample_data = [64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
         for sample in sample_data.iter() {
             base_hasher.update(sample);
-            impl_hasher.update(sample);
+            impl_hasher.update(sample).await;
         }
 
         assert_eq!(base_hasher.finalize(), impl_hasher.finalize().await)
     }
 
-    #[tokio::test]
-    async fn crc32_join() {
+    #[test]
+    fn crc32_join() {
         let mut rng = thread_rng();
         let sample = vec![rng.gen::<u8>(); rng.gen_range(128..1024)];
 
         let (left, right) = sample.split_at(rng.gen_range(1..sample.len()));
-        let (left_crc, right_crc) = (super::crc32(left), super::crc32(right));
+        let (left_crc, right_crc) = (super::crc32_sync(left), super::crc32_sync(right));
 
         assert_eq!(
-            super::crc32(&sample[..]),
+            super::crc32_sync(&sample[..]),
             super::crc32_combine(left_crc, right_crc, right.len())
         )
+    }
+
+    #[test]
+    fn crc32_join_rand() {
+        let mut rng = thread_rng();
+        const SAMPLE_COUNT: usize = 10;
+        const SAMPLE_RANGE: usize = 1024;
+
+        let mut rand_intervals = vec![0..0; SAMPLE_COUNT];
+        rand_intervals[0] = 0..rng.gen_range(5..SAMPLE_RANGE);
+        for idx in 1..SAMPLE_COUNT {
+            let last = &rand_intervals[idx - 1];
+            rand_intervals[idx] = last.end..rng.gen_range(last.end..last.end + SAMPLE_RANGE) + 5;
+        }
+
+        let sample = vec![rng.gen::<u8>(); rand_intervals[SAMPLE_COUNT - 1].end];
+        let rand_intervals: Vec<&[u8]> =
+            rand_intervals.into_iter().map(|range| &sample[range]).collect();
+
+        assert_eq!(crc32_join_all(rand_intervals.as_slice()), super::crc32_sync(&sample))
+    }
+
+    fn crc32_join_all(bytes_arr: &[&[u8]]) -> u32 {
+        use super::{crc32_combine, crc32_sync, log2};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        impl Clone for Node {
+            fn clone(&self) -> Self {
+                Self { len: self.len, crc: AtomicU32::new(self.crc.load(Ordering::SeqCst)) }
+            }
+        }
+
+        #[derive(Default, Debug)]
+        struct Node {
+            len: usize,
+            crc: AtomicU32,
+        }
+
+        match bytes_arr {
+            &[a] => return crc32_sync(a),
+            &[a, b] => return crc32_combine(crc32_sync(a), crc32_sync(b), b.len()),
+            _ => {}
+        }
+
+        let tree_top_len =
+            if bytes_arr.len() % 2 == 0 { bytes_arr.len() - 1 } else { bytes_arr.len() };
+        let tree_bottom_len = bytes_arr.len();
+
+        let mut tree = vec![unsafe { std::mem::zeroed() }; tree_top_len + tree_bottom_len];
+
+        // FIXME
+        #[inline]
+        fn get_higher_row(n: usize) -> std::ops::Range<usize> {
+            std::ops::Range { start: 2usize.pow(n as u32 - 1) - 1, end: n - 1 }
+        }
+
+        for (node, bytes) in tree[tree_bottom_len..].iter_mut().zip(bytes_arr) {
+            *node = Node { crc: AtomicU32::new(crc32_sync(bytes)), len: bytes.len() }
+        }
+
+        let rows = {
+            // 2**n - 1
+
+            let mut n = 2;
+            //TODO: calculate the height of the tree to preallocate enough space
+            let mut rows = vec![0..1];
+            let mut current = 1;
+
+            loop {
+                let next = 2usize.pow(n) - 1;
+                if next > tree.len() {
+                    rows.push(current..tree.len());
+                    break;
+                } else {
+                    rows.push(current..next);
+                }
+
+                current = next;
+                n += 1;
+            }
+
+            rows
+        };
+
+        let mut idx = rows.len() - 1;
+        loop {
+            let (mut lower, mut upper) = match idx {
+                0 => break tree[0].crc.load(Ordering::SeqCst),
+                2 => {
+                    idx -= 1;
+                    (rows[idx].clone(), rows[idx - 1].clone())
+                }
+                _ => (rows[idx].clone(), rows[idx - 1].clone()),
+            };
+
+            while lower.start != lower.end {
+                let (left, right) = (lower.start, upper.start);
+
+                // If we're at the end of the tree and there is only one node
+                if left == tree.len() {
+                    // Move the node up
+                    tree[right] = tree[left - 1].clone();
+                }
+
+                tree[right] = Node {
+                    len: tree[left].len + tree[left + 1].len,
+                    crc: AtomicU32::new(crc32_combine(
+                        tree[left].crc.load(Ordering::SeqCst),
+                        tree[left + 1].crc.load(Ordering::SeqCst),
+                        tree[left + 1].len,
+                    )),
+                };
+
+                upper.start += 1;
+                lower.start += 2;
+            }
+
+            idx -= 1;
+        }
     }
 
     #[tokio::test]
@@ -244,13 +535,13 @@ mod test {
         let sample = vec![rng.gen::<u8>(); 512];
 
         let (a, b, c, d) = (
-            crc32(&sample[0..128]),
-            crc32(&sample[128..256]),
-            crc32(&sample[256..384]),
-            crc32(&sample[384..512]),
+            crc32(&sample[0..128]).await,
+            crc32(&sample[128..256]).await,
+            crc32(&sample[256..384]).await,
+            crc32(&sample[384..512]).await,
         );
 
         let (e, f) = (crc32_combine(a, b, 128), crc32_combine(c, d, 128));
-        assert_eq!(crc32_combine(e, f, 256), crc32(&sample[..]));
+        assert_eq!(crc32_combine(e, f, 256), crc32(&sample[..]).await);
     }
 }
