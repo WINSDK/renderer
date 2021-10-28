@@ -1,7 +1,14 @@
+#![feature(asm)]
+
 extern crate nalgebra as na;
 
 #[cfg(not(any(target_os = "windows", target_family = "unix")))]
 compile_error!("Renderer can only be build for windows, macos and linux.");
+
+#[cfg(target_arch = "x86")]
+use std::arch::x86 as intrinsics;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64 as intrinsics;
 
 mod crc;
 pub use crc::*;

@@ -17,15 +17,15 @@
 /// depth of a PNG image
 use std::borrow::Cow;
 use std::convert::TryInto;
-use std::io;
 use std::path::Path;
-use std::str::from_utf8;
+use std::str::{from_utf8, from_utf8_unchecked};
+use std::{fmt, io};
 
-use crate::crc::Hasher;
+// use crate::crc::Hasher;
 
 use async_compression::tokio::write::ZlibDecoder;
 use tokio::{fs, io::AsyncWriteExt};
-use tokio_stream::{self as stream, StreamExt};
+use futures::stream::{self, StreamExt};
 use wgpu::TextureFormat;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +40,8 @@ pub struct Png {
 pub struct Format {
     pub texture: TextureFormat,
     channel_width: usize,
+    // iCCP profile can only be 79 characters
+    iccp_profile: Option<StackStr<79>>,
 }
 
 #[derive(Debug)]
@@ -52,6 +54,12 @@ pub enum Error {
     Other(Cow<'static, str>),
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct StackStr<const N: usize> {
+    data: [u8; N],
+    len: usize,
+}
+
 #[allow(dead_code)]
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq)]
@@ -61,6 +69,35 @@ enum ColorType {
     Indexed = 3,
     AlphaGrayScale = 4,
     AlphaTruecolor = 6,
+}
+
+impl<const N: usize> StackStr<N> {
+    /// panics when len > N
+    pub fn new(val: &str) -> Self {
+        let len = val.len();
+        if len > N {
+            panic!("str: {} has a len of {} which is more than the size of {}", val, len, N);
+        }
+
+        let data = unsafe {
+            let mut space = std::mem::MaybeUninit::<[u8; N]>::uninit();
+            std::ptr::copy_nonoverlapping(val.as_ptr(), space.as_mut_ptr() as *mut u8, len);
+            space.assume_init()
+        };
+
+        Self { data, len }
+    }
+
+    pub fn get(&self) -> &str {
+        unsafe { from_utf8_unchecked(&self.data) }
+    }
+}
+
+impl<const N: usize> fmt::Debug for StackStr<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.get())?;
+        f.write_str("\n")
+    }
 }
 
 impl ColorType {
@@ -127,6 +164,7 @@ impl Png {
         // TODO: handle other filter methods
         assert_eq!(filter_method, &0u8);
 
+        let mut iccp_profile: Option<StackStr<79>> = None;
         let mut data: Vec<u8> = {
             // TODO: predict decoder output
             let mut decoder = ZlibDecoder::new(Vec::with_capacity(((width + 1) * height) as usize));
@@ -152,12 +190,30 @@ impl Png {
                             decoder.write(chunk).await.or_else(Error::ioerror)?;
                         }
                     },
-                    _ => {
-                        // [image header, textual information]
-                        let exceptions = ["IHDR", "tEXt"];
-                        if !exceptions.contains(&chunk_type) {
-                            unimplemented!("{} chunk handling", chunk_type);
+                    "iCCP" => {
+                        // TODO: ICCP color profile decoder, THIS ISN'T REALLY NECESSARY.
+                        for (idx, charac) in chunk[..80].iter().enumerate() {
+                            let charac = *charac;
+                            match charac {
+                                0 => return Error::other("invalid iCCP profile name"),
+                                161..=255 | 32..=126 => {
+                                    iccp_profile = 
+                                        Some(StackStr::new(from_utf8(&chunk[..idx]).unwrap()));
+                                    break;
+                                },
+                                _ => return Error::other("invalid iCCP profile name")
+                            }
                         }
+
+                        if iccp_profile.is_none() {
+                            return Error::invalid_signature();
+                        }
+                    },
+                    // [image header, [textual information], ICC Profile]
+                    "IHDR" | "tEXt" | "iTXt" | "zTXt" => {},
+                    _ => {
+                        // TODO: handle ICC profiles
+                        unimplemented!("{} chunk handling", chunk_type);
                     }
                 }
             }
@@ -213,12 +269,21 @@ impl Png {
             }
         };
 
-        Ok(Self { data, width, height, format: Format { texture: format, channel_width } })
+        Ok(Self {
+            data,
+            width,
+            height,
+            format: Format { texture: format, iccp_profile, channel_width },
+        })
     }
 
     pub async fn from_path<P: AsRef<Path>>(path: P) -> PngResult {
         let mut data = fs::read(path).await.map_err(Error::IoError)?;
         Png::new(&mut data).await
+    }
+
+    pub fn to_rgba8(&self) -> Self {
+        unimplemented!()
     }
 }
 
@@ -279,11 +344,11 @@ impl<'png> Iterator for PngChunks<'png> {
             _ => (),
         }
 
-        let mut crc = Hasher::new();
-        crc.update(chunk_type.as_bytes());
-        crc.update(data);
+        // let mut crc = Hasher::new();
+        // crc.update(chunk_type.as_bytes());
+        // crc.update(data);
 
-        assert_eq!(_checksum, crc.finalize());
+        //assert_eq!(_checksum, crc.finalize_sync());
         Some((data, chunk_type))
     }
 }
@@ -311,7 +376,6 @@ fn handle_palette(
                 chunk[pos] = channel[0];
                 chunk[pos + 1] = channel[1];
                 chunk[pos + 2] = channel[2];
-                chunk[pos + 3] = 0;
                 pos += 4;
             }
 
@@ -357,11 +421,12 @@ impl Error {
     error_fn!(other, Error::Other, Cow<'static, str>);
 }
 
-#[cfg(all(target_family = "unix", test))]
+#[cfg(test)]
 mod test {
     use super::Png;
     use std::path::Path;
 
+    #[cfg(target_family = "unix")]
     #[tokio::test]
     async fn check_png_attributes() {
         use std::process::{Command, Stdio};

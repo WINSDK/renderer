@@ -20,9 +20,8 @@ wgpu = { version = "0.10", features = ["spirv"] }
 log = "0.4"
 png = "0.16"
 
-tokio-stream = "0.1"
 async-compression = { version = "0.3", features = ["tokio", "zlib"] }
-# futures = { version = "0.3", features = ["async-await"] }
+futures = { version = "0.3", features = ["async-await"] }
 
 [dev-dependencies]
 crc32fast = "1.2"

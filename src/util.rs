@@ -77,7 +77,7 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
     use tokio::io::AsyncReadExt;
 
     let shader = fs::read(&path).await?;
-    let hash = crc32(&shader[4..]);
+    let hash = crc32(&shader[4..]).await;
 
     let mut handle = fs::File::open(&path).await?;
     let mut buf = [0u8; 4];
@@ -152,7 +152,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         Vec::from_raw_parts(ptr as *mut u8, len, capacity)
     };
 
-    let hash = crc32(&binary_u8[..]);
+    let hash = crc32(&binary_u8[..]).await;
     let mut file = Vec::with_capacity(binary_u8.len() + size_of_val(&hash));
     file.extend(u32::to_le_bytes(hash));
     file.extend_from_slice(&binary_u8[..]);
@@ -184,7 +184,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         .compile_into_spirv(&src, stage, path.as_ref().to_str().unwrap(), "main", None)
         .unwrap();
 
-    let hash = crc32(binary.as_binary_u8());
+    let hash = crc32(binary.as_binary_u8()).await;
     let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of_val(&hash));
     file.extend(u32::to_le_bytes(hash));
     file.extend_from_slice(binary.as_binary_u8());
