@@ -1,27 +1,10 @@
-/// Indexed-color => image representation in which each pixel of the original image is represented
-/// by a single index into a palette.
-///
-/// Indexing => representing an image by a palette, an alpha table and
-/// an array of indices pointing to entries in the palette and alpha table.
-///
-/// Palette => indexed table of three 8-bit sample values, red, green, and blue.
-/// In an indexed image it defines the red, green, and blue sample values of the reference image.
-/// In other cases, the palette may be a suggested palette that viewers may use on old limited.
-/// Alpha samples may be defined for palette entries via the alpha table to reconstruct alpha samples.
-///
-/// Sample Depth => number of bits used to represent a sample. In an indexed-color image, samples
-/// are stored in the palette thus the sample depth will always be 8, for any other PNG image
-/// it is the same as the bit depth.
-///
-/// Sample Depth Scaling => mapping of a range of sample values onto the full range of the sample
-/// depth of a PNG image
+#![allow(dead_code)]
+
 use std::borrow::Cow;
 use std::convert::TryInto;
 use std::path::Path;
 use std::str::{from_utf8, from_utf8_unchecked};
 use std::{fmt, io};
-
-// use crate::crc::Hasher;
 
 use async_compression::tokio::write::ZlibDecoder;
 use futures::stream::{self, StreamExt};
@@ -342,11 +325,7 @@ impl<'png> Iterator for PngChunks<'png> {
             _ => (),
         }
 
-        // let mut crc = Hasher::new();
-        // crc.update(chunk_type.as_bytes());
-        // crc.update(data);
-
-        //assert_eq!(_checksum, crc.finalize_sync());
+        //assert_eq!(_checksum, crc);
         Some((data, chunk_type))
     }
 }

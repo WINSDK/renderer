@@ -1,13 +1,13 @@
 use crate::crc::crc32;
 use png::{BitDepth, ColorType};
 use std::{
+    fs,
     borrow::Cow,
     fmt::Debug,
-    io::{self, ErrorKind},
+    io::{self, Read, ErrorKind},
     mem::{size_of, size_of_val, ManuallyDrop},
     path::{Path, PathBuf},
 };
-use tokio::fs;
 use wgpu::{Device, ShaderModule, ShaderSource, ShaderStages};
 
 pub struct Png {
@@ -21,7 +21,7 @@ pub struct Png {
 
 #[inline(always)]
 pub async fn read_png<P: AsRef<Path>>(path: P) -> Result<Png, io::Error> {
-    let bytes = tokio::fs::read(&path).await?;
+    let bytes = fs::read(&path)?;
     log::info!("reading png from: {:?}", path.as_ref());
     convert_to_png(bytes.as_slice()).await
 }
@@ -74,15 +74,13 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
     path: P,
     device: &Device,
 ) -> io::Result<ShaderModule> {
-    use tokio::io::AsyncReadExt;
-
-    let shader = fs::read(&path).await?;
+    let shader = fs::read(&path)?;
     let hash = crc32(&shader[4..]).await;
 
-    let mut handle = fs::File::open(&path).await?;
+    let mut handle = fs::File::open(&path)?;
     let mut buf = [0u8; 4];
 
-    handle.read_exact(&mut buf).await?;
+    handle.read_exact(&mut buf)?;
 
     // cached shader matches shader source.
     if hash == u32::from_le_bytes(buf) {
@@ -123,7 +121,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     };
 
     let module = {
-        let src = fs::read_to_string(&path).await?;
+        let src = fs::read_to_string(&path)?;
         let mut parser = Parser::default();
         let module = parser.parse(&GlslOptions::from(stage), &src[..]).unwrap();
 
@@ -157,7 +155,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     file.extend(u32::to_le_bytes(hash));
     file.extend_from_slice(&binary_u8[..]);
 
-    fs::write(create_cache_path(path), file).await?;
+    fs::write(create_cache_path(path), file)?;
 
     Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
         label: None,
