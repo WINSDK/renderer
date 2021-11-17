@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use std::f32::consts::FRAC_PI_2;
 
 #[allow(dead_code)]
 #[rustfmt::skip]
@@ -42,17 +43,18 @@ pub struct CameraUniform {
 impl CameraUniform {
     pub fn new(width: u32, height: u32) -> Self {
         // camera is located at 0.0, 0.0, 1.0
-        let eye = na::Point3::new(0.0, 0.0, 3.0);
+        let eye = na::Point3::new(0.0, 0.0, 1.0);
         // looking at the center.
-        let target = na::Point3::new(0.0, 0.0, 0.0);
 
-        // 90 FOV, aspect ratio, near (keep small due to f32 precision), far, (keep small)
-        let proj =
-            na::Perspective3::new(90.0, width as f32 / height as f32, 0.1, 100.0).to_homogeneous();
+        // (?, y, )
+        let target = na::Point3::new(1.0, 0.6, 0.0);
+
+        // aspect ratio, FOV (radians), near (keep small due to f32 precision), far, (keep small)
+        let proj = na::Perspective3::new(width as f32 / height as f32, FRAC_PI_2, 1.0, 1000.0);
         let view = na::Isometry3::look_at_rh(&eye, &target, &na::Vector3::y());
         let model = na::Isometry3::new(na::Vector3::x(), na::zero());
 
-        Self { proj, view: view.to_homogeneous(), model: model.to_homogeneous() }
+        Self { proj: *proj.as_matrix(), view: view.to_homogeneous(), model: model.to_homogeneous() }
     }
 }
 

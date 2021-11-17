@@ -293,7 +293,13 @@ impl Window {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: MultisampleState {
+                // The number of samples for multisampling
+                count: 1,
+                // a mask for what samples are active: !0 means all of them
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
         });
 
         Self {
