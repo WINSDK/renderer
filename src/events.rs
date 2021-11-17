@@ -59,7 +59,7 @@ pub async fn run(mut window: crate::Window) {
                     window.surfaces.iter_mut().for_each(|surface| {
                         surface.config.width = size.width.max(max.width);
                         surface.config.height = size.height.max(max.height);
-                        surface.handle.configure(&device, &surface.config);
+                        surface.handle.configure(device, &surface.config);
                     });
                 }
                 _ => (),

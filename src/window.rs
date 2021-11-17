@@ -73,8 +73,7 @@ impl Display {
         let surface = unsafe { instance.create_surface(window.clone().as_ref()) };
         let adapter = instance
             .enumerate_adapters(backend)
-            .filter(|adapter| surface.get_preferred_format(&adapter).is_some())
-            .next()
+            .find(|adapter| surface.get_preferred_format(adapter).is_some())
             .ok_or(wgpu::RequestDeviceError)?;
 
         let trace_dir = std::env::var("WGPU_TRACE");

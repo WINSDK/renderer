@@ -2,9 +2,9 @@
 
 use std::borrow::Cow;
 use std::convert::TryInto;
+use std::fmt;
 use std::path::Path;
 use std::str::{from_utf8, from_utf8_unchecked};
-use std::{fmt, io};
 
 use async_compression::tokio::write::ZlibDecoder;
 use futures::stream::{self, StreamExt};
@@ -33,7 +33,7 @@ pub enum Error {
     CorruptedFile,
     Unimplimented(Cow<'static, str>),
     Unsupported(Cow<'static, str>),
-    IoError(io::Error),
+    IO(std::io::Error),
     Other(Cow<'static, str>),
 }
 
@@ -100,7 +100,7 @@ impl Png {
     /// WARNING: TextureFormat must match swapchain's TextureFormat
     pub async fn new(mut data: &mut [u8]) -> PngResult {
         // Check `magic bytes` to evaluate whether the file is a png.
-        if &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0xA, 0x1A, 0x0A] != &data[..8] {
+        if [0x89, 0x50, 0x4E, 0x47, 0x0D, 0xA, 0x1A, 0x0A] != data[..8] {
             return Error::invalid_signature();
         }
 
@@ -163,12 +163,12 @@ impl Png {
 
                         // section 11.2.3
                         assert!(![Truecolor, Indexed, AlphaTruecolor].contains(&color_type));
-                        palette = Some(unsafe { &*(chunk.as_ref() as *const _) });
+                        palette = unsafe { (chunk as *const [u8]).as_ref() };
                     },
                     "IDAT" /* image data chunks */ => {
                         if let Some(palette) = palette {
                             decoder.write(&handle_palette(chunk, palette, &color_type)?
-                                .unwrap_or(chunk.to_vec())).await.or_else(Error::ioerror)?;
+                                .unwrap_or_else(|| chunk.to_vec())).await.or_else(Error::ioerror)?;
                         } else {
                             decoder.write(chunk).await.or_else(Error::ioerror)?;
                         }
@@ -259,7 +259,7 @@ impl Png {
     }
 
     pub async fn from_path<P: AsRef<Path>>(path: P) -> PngResult {
-        let mut data = fs::read(path).await.map_err(Error::IoError)?;
+        let mut data = fs::read(path).await.map_err(Error::IO)?;
         Png::new(&mut data).await
     }
 
@@ -339,7 +339,7 @@ fn handle_palette(
 
     // section 11.2.3
     match color_type {
-        GrayScale | AlphaGrayScale => return Error::other("Invalid color type for palette"),
+        GrayScale | AlphaGrayScale => Error::other("Invalid color type for palette"),
         Truecolor | AlphaTruecolor => {
             // should probably be using a sPLT
             Ok(None)
@@ -393,7 +393,7 @@ impl Error {
 
     error_fn!(unsupported, Error::Unsupported, Cow<'static, str>);
 
-    error_fn!(ioerror, Error::IoError, io::Error);
+    error_fn!(ioerror, Error::IO, std::io::Error);
 
     error_fn!(other, Error::Other, Cow<'static, str>);
 }

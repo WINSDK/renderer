@@ -38,15 +38,12 @@ const DEFAULT_HASH: u32 = 0xffffffff;
 const CRC_BITS: usize = 32;
 const CHUNK_SIZE: usize = 256;
 
+#[derive(Default)]
 pub struct Hasher<'hash> {
     streams: Vec<&'hash [u8]>,
 }
 
 impl<'hash> Hasher<'hash> {
-    pub fn new() -> Self {
-        Hasher { streams: Vec::new() }
-    }
-
     #[inline]
     pub fn update(&mut self, data: &'hash [u8]) {
         let size = (data.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
@@ -76,7 +73,7 @@ impl<'hash> Hasher<'hash> {
             futures.push(async move {
                 let mut bytes = Vec::new();
                 let bytes: &[u8] = if stream.len() == CHUNK_SIZE {
-                    &stream
+                    stream
                 } else {
                     let len = stream.len();
 
@@ -127,7 +124,7 @@ pub fn crc32_sync(data: &[u8]) -> u32 {
 /// Calculate's CRC32
 #[inline]
 pub async fn crc32(data: &[u8]) -> u32 {
-    let mut hasher = Hasher::new();
+    let mut hasher = Hasher::default();
     hasher.update(data);
     hasher.finalize().await
 }
@@ -144,7 +141,7 @@ fn crc32_sync_impl(crc: u32, data: &[u8]) -> u32 {
 
 #[inline]
 fn crc32_impl(mut crc: u32, data: &[u8]) -> u32 {
-    if data.len() == 0 {
+    if data.is_empty() {
         return crc;
     }
 
@@ -290,15 +287,11 @@ unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     x1 = _mm_xor_si128(x1, x2);
 
     let mut crc = _mm_extract_epi32::<1>(x1) as u32;
-    let crc = if let Some(bytes) = remainder {
+    if let Some(bytes) = remainder {
         for byte in bytes {
             crc = CRCTAB[((crc ^ *byte as u32) & 0xff) as usize] ^ (crc >> 8);
         }
-
-        crc
-    } else {
-        crc
-    };
+    }
 
     crc ^ !0
 }
@@ -318,9 +311,10 @@ fn crc32_combine(mut acrc: u32, bcrc: u32, mut blen: usize) -> u32 {
 
     // put operator for one zero bit in odd
     odd[0] = 0xEDB88320; // CRC-32 polynomial
+
     let mut row = 1;
-    for idx in 1..CRC_BITS {
-        odd[idx] = row;
+    for odd_one in odd.iter_mut().take(CRC_BITS).skip(1) {
+        *odd_one = row;
         row <<= 1;
     }
 
@@ -338,11 +332,11 @@ fn crc32_combine(mut acrc: u32, bcrc: u32, mut blen: usize) -> u32 {
     let odd = &mut odd;
     while blen != 0 {
         for (square, mat) in even.iter_mut().zip(odd.iter()) {
-            *square = gf2_matrix_times(&odd, *mat);
+            *square = gf2_matrix_times(odd, *mat);
         }
 
         if (blen & 1) != 0 {
-            acrc = gf2_matrix_times(&even, acrc);
+            acrc = gf2_matrix_times(even, acrc);
         }
 
         blen >>= 1;
@@ -418,7 +412,7 @@ mod test {
     #[tokio::test]
     async fn crc32_hasher() {
         let mut rng = thread_rng();
-        let (mut base_hasher, mut impl_hasher) = (crc32fast::Hasher::new(), super::Hasher::new());
+        let (mut base_hasher, mut impl_hasher) = (crc32fast::Hasher::new(), super::Hasher::default());
 
         let sample_data = [16, 32, 64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
         for sample in sample_data.iter() {

@@ -1,10 +1,10 @@
 use crate::crc::crc32;
 use png::{BitDepth, ColorType};
 use std::{
-    fs,
     borrow::Cow,
     fmt::Debug,
-    io::{self, Read, ErrorKind},
+    fs,
+    io::{self, ErrorKind, Read},
     mem::{size_of, size_of_val, ManuallyDrop},
     path::{Path, PathBuf},
 };
