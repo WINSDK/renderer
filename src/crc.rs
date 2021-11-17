@@ -1,7 +1,4 @@
-use futures::stream::FuturesOrdered;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-// Algorithm based on Adler-32, full credits to the former go to Mark Adler.
+// Algorithm based on Adler-32, credits go to Mark Adler for creating the original.
 const CRCTAB: [u32; 256] = [
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f, 0xe963a535, 0x9e6495a3,
     0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988, 0x09b64c2b, 0x7eb17cbd, 0xe7b82d07, 0x90bf1d91,
@@ -38,16 +35,11 @@ const CRCTAB: [u32; 256] = [
 ];
 
 const DEFAULT_HASH: u32 = 0xffffffff;
-const STACK_SIZE: usize = 64;
 const CRC_BITS: usize = 32;
+const CHUNK_SIZE: usize = 256;
 
-struct Chunk<'hash> {
-    bytes: &'hash [u8],
-    crc: AtomicU32,
-}
-
-pub struct Hasher<'item> {
-    streams: Vec<Chunk<'item>>,
+pub struct Hasher<'hash> {
+    streams: Vec<&'hash [u8]>,
 }
 
 impl<'hash> Hasher<'hash> {
@@ -56,62 +48,87 @@ impl<'hash> Hasher<'hash> {
     }
 
     #[inline]
-    pub async fn update(&mut self, data: &'hash [u8]) {
-        const CHUNK_SIZE: usize = 512;
+    pub fn update(&mut self, data: &'hash [u8]) {
         let size = (data.len() as f64 / CHUNK_SIZE as f64).ceil() as usize;
 
         self.streams.reserve(size);
-
-        // assert that the chunk order number (initial crc in this case) doesn't overflow
-        assert!(size + self.streams.len() <= u32::MAX as usize);
-
-        for (idx, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
-            self.streams.push(Chunk { bytes: chunk, crc: AtomicU32::new(idx as u32) })
-        }
+        self.streams.extend(data.chunks(CHUNK_SIZE))
     }
 
     /// Calculates current crc32 hash, takes &self as the hash can continue to be updated.
-    pub async fn finalize(&mut self) -> u32 {
-        use futures::stream::StreamExt;
+    pub async fn finalize(&self) -> u32 {
+        use futures::stream::{FuturesOrdered, StreamExt};
+        use std::sync::{Arc, Mutex};
 
         match self.streams.len() {
             0 => return DEFAULT_HASH,
-            1 => return crc32_impl(DEFAULT_HASH, self.streams[0].bytes),
+            1 => return crc32_sync(self.streams[0]),
             _ => {}
         }
 
+        // A Vec with the (pos, pad_byte_count)
+        let padded_chunks = Arc::new(Mutex::new(Vec::new()));
         let mut futures = FuturesOrdered::new();
-        for stream in self.streams.iter() {
-            let bytes = (&stream.bytes) as *const _;
-            futures.push(async move { crc32_sync(unsafe { *bytes }) })
+
+        for (idx, stream) in self.streams.iter().enumerate() {
+            let sender = Arc::clone(&padded_chunks);
+
+            futures.push(async move {
+                let mut bytes = Vec::new();
+                let bytes: &[u8] = if stream.len() == CHUNK_SIZE {
+                    &stream
+                } else {
+                    let len = stream.len();
+
+                    bytes.reserve(CHUNK_SIZE);
+                    bytes.extend(*stream);
+
+                    // TODO: add safe method to pad to `CHUNK_SIZE` bytes
+                    unsafe {
+                        bytes.set_len(CHUNK_SIZE);
+                        bytes[len + 1..].fill(0);
+                    }
+
+                    sender.lock().unwrap().push((idx, CHUNK_SIZE - len));
+                    &bytes
+                };
+
+                crc32_sync(bytes)
+            })
         }
 
-        let crc = AtomicU32::new(DEFAULT_HASH);
-        let mut streams = self.streams.iter().skip(1);
-        while let Some(new) = futures.next().await {
-            match streams.next() {
-                Some(next) => {
-                    let len_next = next.bytes.len();
-                    let crc_next = crc32_combine(crc.load(Ordering::Acquire), new, len_next);
-                    crc.store(crc_next, Ordering::Release);
-                }
-                None => break,
-            };
+        let futures: Vec<u32> = futures.collect().await;
+        let mut pad_pos = 0;
+        let mut crc = 0;
+
+        // Move out of Arc<Mutex<_>>
+        let padded_chunks = Arc::try_unwrap(padded_chunks).unwrap().into_inner().unwrap();
+        for (idx, next) in futures.iter().enumerate() {
+            crc = crc32_combine(crc, *next, CHUNK_SIZE);
+
+            if padded_chunks.get(pad_pos).map(|v| v.0) == Some(idx) {
+                crc = crc32_remove_zeros(crc, padded_chunks[pad_pos].1);
+
+                pad_pos += 1;
+            }
         }
 
-        crc.load(Ordering::SeqCst) ^ !0
+        crc
     }
 }
 
+/// Calculate's CRC32, requires `data` to be a multiple of 4
 #[inline]
 pub fn crc32_sync(data: &[u8]) -> u32 {
+    debug_assert!(data.len() % 4 == 0);
     crc32_sync_impl(DEFAULT_HASH, data)
 }
 
+/// Calculate's CRC32
 #[inline]
 pub async fn crc32(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
-    hasher.update(data).await;
+    hasher.update(data);
     hasher.finalize().await
 }
 
@@ -350,6 +367,24 @@ fn gf2_matrix_times(mat: &[u32; CRC_BITS], mut vec: u32) -> u32 {
     sum
 }
 
+/// Remove's padding from stream
+#[inline]
+fn crc32_remove_zeros(mut crc: u32, mut n: usize) -> u32 {
+    crc = !crc;
+
+    while n != 0 {
+        for _ in 0..8 {
+            crc = if (crc & 0x80000000) == 0 { crc << 1 } else { (crc << 1) ^ 0xdb710641u32 }
+        }
+
+        n -= 1;
+    }
+
+    !crc
+}
+
+// Redundant
+#[allow(dead_code)]
 #[inline]
 fn log2(val: usize) -> usize {
     unsafe {
@@ -385,10 +420,10 @@ mod test {
         let mut rng = thread_rng();
         let (mut base_hasher, mut impl_hasher) = (crc32fast::Hasher::new(), super::Hasher::new());
 
-        let sample_data = [64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
+        let sample_data = [16, 32, 64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
         for sample in sample_data.iter() {
             base_hasher.update(sample);
-            impl_hasher.update(sample).await;
+            impl_hasher.update(sample);
         }
 
         assert_eq!(base_hasher.finalize(), impl_hasher.finalize().await)
@@ -397,9 +432,11 @@ mod test {
     #[test]
     fn crc32_join() {
         let mut rng = thread_rng();
-        let sample = vec![rng.gen::<u8>(); rng.gen_range(128..1024)];
 
-        let (left, right) = sample.split_at(rng.gen_range(1..sample.len()));
+        // Generate sample's where the data and slice's are a multiple of 4
+        let sample = vec![rng.gen::<u8>(); rng.gen_range(128 / 4..1024 / 4) * 4];
+        let (left, right) = sample.split_at(rng.gen_range(1..sample.len() / 4) * 4);
+
         let (left_crc, right_crc) = (super::crc32_sync(left), super::crc32_sync(right));
 
         assert_eq!(
@@ -409,139 +446,19 @@ mod test {
     }
 
     #[test]
-    fn crc32_join_rand() {
+    fn remove_zeros() {
         let mut rng = thread_rng();
-        const SAMPLE_COUNT: usize = 10;
-        const SAMPLE_RANGE: usize = 1024;
+        let sample = {
+            let mut joined: Vec<u8> = Vec::with_capacity(512);
 
-        let mut rand_intervals = vec![0..0; SAMPLE_COUNT];
-        rand_intervals[0] = 0..rng.gen_range(5..SAMPLE_RANGE);
-        for idx in 1..SAMPLE_COUNT {
-            let last = &rand_intervals[idx - 1];
-            rand_intervals[idx] = last.end..rng.gen_range(last.end..last.end + SAMPLE_RANGE) + 5;
-        }
-
-        let sample = vec![rng.gen::<u8>(); rand_intervals[SAMPLE_COUNT - 1].end];
-        let rand_intervals: Vec<&[u8]> =
-            rand_intervals.into_iter().map(|range| &sample[range]).collect();
-
-        assert_eq!(crc32_join_all(rand_intervals.as_slice()), super::crc32_sync(&sample))
-    }
-
-    fn crc32_join_all(bytes_arr: &[&[u8]]) -> u32 {
-        use super::{crc32_combine, crc32_sync, log2};
-        use std::sync::atomic::{AtomicU32, Ordering};
-
-        impl Clone for Node {
-            fn clone(&self) -> Self {
-                Self { len: self.len, crc: AtomicU32::new(self.crc.load(Ordering::SeqCst)) }
-            }
-        }
-
-        #[derive(Default, Debug)]
-        struct Node {
-            len: usize,
-            crc: AtomicU32,
-        }
-
-        match bytes_arr {
-            &[a] => return crc32_sync(a),
-            &[a, b] => return crc32_combine(crc32_sync(a), crc32_sync(b), b.len()),
-            _ => {}
-        }
-
-        let tree_top_len =
-            if bytes_arr.len() % 2 == 0 { bytes_arr.len() - 1 } else { bytes_arr.len() };
-        let tree_bottom_len = bytes_arr.len();
-
-        let mut tree = vec![unsafe { std::mem::zeroed() }; tree_top_len + tree_bottom_len];
-
-        // FIXME
-        #[inline]
-        fn get_higher_row(n: usize) -> std::ops::Range<usize> {
-            std::ops::Range { start: 2usize.pow(n as u32 - 1) - 1, end: n - 1 }
-        }
-
-        for (node, bytes) in tree[tree_bottom_len..].iter_mut().zip(bytes_arr) {
-            *node = Node { crc: AtomicU32::new(crc32_sync(bytes)), len: bytes.len() }
-        }
-
-        let rows = {
-            // 2**n - 1
-
-            let mut n = 2;
-            //TODO: calculate the height of the tree to preallocate enough space
-            let mut rows = vec![0..1];
-            let mut current = 1;
-
-            loop {
-                let next = 2usize.pow(n) - 1;
-                if next > tree.len() {
-                    rows.push(current..tree.len());
-                    break;
-                } else {
-                    rows.push(current..next);
-                }
-
-                current = next;
-                n += 1;
-            }
-
-            rows
+            joined.extend(vec![rng.gen::<u8>(); 356]);
+            joined.extend(vec![0; 156]);
+            joined
         };
 
-        let mut idx = rows.len() - 1;
-        loop {
-            let (mut lower, mut upper) = match idx {
-                0 => break tree[0].crc.load(Ordering::SeqCst),
-                2 => {
-                    idx -= 1;
-                    (rows[idx].clone(), rows[idx - 1].clone())
-                }
-                _ => (rows[idx].clone(), rows[idx - 1].clone()),
-            };
-
-            while lower.start != lower.end {
-                let (left, right) = (lower.start, upper.start);
-
-                // If we're at the end of the tree and there is only one node
-                if left == tree.len() {
-                    // Move the node up
-                    tree[right] = tree[left - 1].clone();
-                }
-
-                tree[right] = Node {
-                    len: tree[left].len + tree[left + 1].len,
-                    crc: AtomicU32::new(crc32_combine(
-                        tree[left].crc.load(Ordering::SeqCst),
-                        tree[left + 1].crc.load(Ordering::SeqCst),
-                        tree[left + 1].len,
-                    )),
-                };
-
-                upper.start += 1;
-                lower.start += 2;
-            }
-
-            idx -= 1;
-        }
-    }
-
-    #[tokio::test]
-    async fn binary_chunk_tree() {
-        use super::*;
-
-        let mut rng = thread_rng();
-        let sample = vec![rng.gen::<u8>(); 512];
-
-        let (a, b, c, d) = (
-            crc32(&sample[0..128]).await,
-            crc32(&sample[128..256]).await,
-            crc32(&sample[256..384]).await,
-            crc32(&sample[384..512]).await,
+        assert_eq!(
+            super::crc32_remove_zeros(super::crc32_sync(&sample[..]), 156),
+            super::crc32_sync(&sample[..512 - 156])
         );
-
-        let (e, f) = (crc32_combine(a, b, 128), crc32_combine(c, d, 128));
-        assert_eq!(crc32_combine(e, f, 256), crc32(&sample[..]).await);
     }
 }
