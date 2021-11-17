@@ -155,6 +155,7 @@ fn crc32_impl(mut crc: u32, data: &[u8]) -> u32 {
 unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     // based on the http://intel.ly/2ySEwL0 paper
     use crate::intrinsics::*;
+    use std::mem::transmute;
 
     // Buffer has to be at least 64 bytes and a multiple of 16...
     if data.len() < 64 {
@@ -172,10 +173,10 @@ unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     };
 
     // CRC32+Barrett polynomials.
-    const K1K2: [u64; 2] = [0x0154442bd4, 0x01c6e41596];
-    const K3K4: [u64; 2] = [0x01751997d0, 0x00ccaa009e];
-    const K5K0: [u64; 2] = [0x0163cd6124, 0x0000000000];
-    const POLY: [u64; 2] = [0x01db710641, 0x01f7011641];
+    const K1K2: __m128i = unsafe { transmute([0x0154442bd4u64, 0x01c6e41596u64]) };
+    const K3K4: __m128i = unsafe { transmute([0x01751997d0u64, 0x00ccaa009eu64]) };
+    const K5K0: __m128i = unsafe { transmute([0x0163cd6124u64, 0x0000000000u64]) };
+    const POLY: __m128i = unsafe { transmute([0x01db710641u64, 0x01f7011641u64]) };
 
     let (
         mut x0,
@@ -200,7 +201,7 @@ unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     x4 = _mm_loadu_si128(data.as_ptr().offset(0x30) as *const __m128i);
 
     x1 = _mm_xor_si128(x1, _mm_cvtsi32_si128(crc as i32));
-    x0 = _mm_load_si128(K1K2.as_ptr() as *const __m128i);
+    x0 = _mm_load_si128(&K1K2);
 
     data = &data[64..];
 
@@ -235,7 +236,7 @@ unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     }
 
     // fold into 128-bits.
-    x0 = _mm_load_si128(K3K4.as_ptr() as *const __m128i);
+    x0 = _mm_load_si128(&K3K4);
 
     x5 = _mm_clmulepi64_si128::<0x00>(x1, x0);
     x1 = _mm_clmulepi64_si128::<0x11>(x1, x0);
@@ -270,7 +271,7 @@ unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     x1 = _mm_srli_si128::<8>(x1);
     x1 = _mm_xor_si128(x1, x2);
 
-    x0 = _mm_loadl_epi64(K5K0.as_ptr() as *const __m128i);
+    x0 = _mm_loadl_epi64(&K5K0);
 
     x2 = _mm_srli_si128::<4>(x1);
     x1 = _mm_and_si128(x1, x3);
@@ -278,7 +279,7 @@ unsafe fn crc32_simd_impl(crc: u32, mut data: &[u8]) -> u32 {
     x1 = _mm_xor_si128(x1, x2);
 
     // barret reduce to 32-bits.
-    x0 = _mm_load_si128(POLY.as_ptr() as *const __m128i);
+    x0 = _mm_load_si128(&POLY);
 
     x2 = _mm_and_si128(x1, x3);
     x2 = _mm_clmulepi64_si128::<0x10>(x2, x0);
@@ -412,7 +413,8 @@ mod test {
     #[tokio::test]
     async fn crc32_hasher() {
         let mut rng = thread_rng();
-        let (mut base_hasher, mut impl_hasher) = (crc32fast::Hasher::new(), super::Hasher::default());
+        let (mut base_hasher, mut impl_hasher) =
+            (crc32fast::Hasher::new(), super::Hasher::default());
 
         let sample_data = [16, 32, 64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
         for sample in sample_data.iter() {

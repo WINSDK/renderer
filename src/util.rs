@@ -58,7 +58,7 @@ pub async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     }
 }
 
-#[inline(always)]
+#[inline]
 fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
     let cache_path = path.as_ref().with_extension("spv");
     let cache_path = cache_path.file_name().unwrap();
