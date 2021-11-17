@@ -395,7 +395,6 @@ impl Error {
 
 #[cfg(test)]
 mod test {
-    use super::Png;
     use std::path::Path;
 
     #[cfg(target_family = "unix")]

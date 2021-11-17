@@ -378,16 +378,14 @@ fn crc32_remove_zeros(mut crc: u32, mut n: usize) -> u32 {
     !crc
 }
 
-// Redundant
-#[allow(dead_code)]
-#[inline]
-fn log2(val: usize) -> usize {
-    unsafe {
-        let res: usize;
-        asm!("bsr eax, edi", out("eax") res, in("edi") val);
-        res
-    }
-}
+// #[inline]
+// fn log2(val: usize) -> usize {
+//     unsafe {
+//         let res: usize;
+//         asm!("bsr eax, edi", out("eax") res, in("edi") val);
+//         res
+//     }
+// }
 
 #[cfg(test)]
 mod test {
