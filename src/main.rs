@@ -1,5 +1,3 @@
-#![feature(asm)]
-
 extern crate nalgebra as na;
 
 #[cfg(not(any(target_os = "windows", target_family = "unix")))]

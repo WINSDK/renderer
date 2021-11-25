@@ -33,7 +33,7 @@ fn generate_window(title: &str, icon: Option<Icon>, event_loop: &EventLoop<()>) 
         .with_taskbar_icon(icon.clone())
         .with_window_icon(icon)
         .with_min_inner_size(MIN_WIN_SIZE)
-        .build(&event_loop)
+        .build(event_loop)
         .unwrap()
 }
 

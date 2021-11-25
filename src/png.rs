@@ -58,9 +58,7 @@ impl<const N: usize> StackStr<N> {
     /// panics when len > N
     pub fn new(val: &str) -> Self {
         let len = val.len();
-        if len > N {
-            panic!("str: {} has a len of {} which is more than the size of {}", val, len, N);
-        }
+        assert!(len > N, "str: {} has a len of {} which is more than the size of {}", val, len, N);
 
         let data = unsafe {
             let mut space = std::mem::MaybeUninit::<[u8; N]>::uninit();
@@ -113,7 +111,7 @@ impl Png {
             &mut data[pos - 4..] // go back a 4 bytes to include the type
         };
 
-        let chunks = PngChunks::new(&mut data);
+        let chunks = PngChunks::new(data);
         let mut iter = stream::iter(chunks);
         let (ihdr_chunk, chunk_type) = iter.next().await.unwrap();
         if chunk_type != "IHDR" {
@@ -275,10 +273,7 @@ struct PngChunks<'png> {
 
 impl<'png> PngChunks<'png> {
     fn new(slice: &'png mut [u8]) -> Self {
-        if slice.len() < 67 {
-            panic!("PNG must be more than 67 bytes");
-        }
-
+        assert!(slice.len() < 67, "PNG must be more than 67 bytes");
         Self { slice, pos: 0 }
     }
 }
@@ -400,7 +395,6 @@ impl Error {
 
 #[cfg(test)]
 mod test {
-    use super::Png;
     use std::path::Path;
 
     #[cfg(target_family = "unix")]
