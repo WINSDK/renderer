@@ -1,3 +1,4 @@
+use crate::{camera, uniforms};
 use std::{mem::size_of, sync::Arc};
 use wgpu::*;
 use winit::{
@@ -96,10 +97,10 @@ impl Display {
 
 pub struct Window {
     pub display: Display,
+    pub camera: camera::Camera,
     pub surfaces: Vec<Surfaces>,
     pub bind_groups: Vec<BindGroups>,
     pub pipelines: Vec<Pipelines>,
-    pub uniform_buffers: Vec<Buffer>,
     pub vertex_buffers: Vec<Buffer>,
     pub index_buffers: Vec<Buffer>,
     pub index_count: usize,
@@ -115,7 +116,7 @@ impl Window {
             present_mode = PresentMode::Fifo;
         }
 
-        let (vertices, indices) = crate::create_vertices();
+        let (vertices, indices) = uniforms::create_vertices();
         log::info!("Reading texture and writting to queue..");
 
         let surface = {
@@ -135,10 +136,13 @@ impl Window {
             Surfaces::new(surface, config, format)
         };
 
-        let texture =
-            crate::Texture::new("./test_cases/joe_biden.png", &display.device, &display.queue)
-                .await
-                .unwrap();
+        let texture = crate::texture::Texture::new(
+            "./test_cases/joe_biden.png",
+            &display.device,
+            &display.queue,
+        )
+        .await
+        .unwrap();
 
         let texture_bind_group_layout =
             display.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -180,60 +184,45 @@ impl Window {
 
         log::info!("Initializing vertex data..");
         let vertex_buffer = display.device.create_buffer(&BufferDescriptor {
-            label: Some("Camera vertex buffer"),
-            size: (size_of::<crate::Vertex>() * vertices.len()) as u64,
+            label: Some("Vertex buffer"),
+            size: (size_of::<uniforms::Vertex>() * vertices.len()) as u64,
             usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        display.queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(vertices.as_slice()));
+        display.queue.write_buffer(&vertex_buffer, 0, crate::cast_slice(vertices.as_slice()));
 
         log::info!("Initializing indices..");
         let index_buffer = display.device.create_buffer(&BufferDescriptor {
-            label: Some("Camera indices buffer"),
+            label: Some("Indices buffer"),
             size: (size_of::<u16>() * indices.len()) as u64,
             usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        display.queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(indices.as_slice()));
+        display.queue.write_buffer(&index_buffer, 0, crate::cast_slice(indices.as_slice()));
 
-        log::info!("Initializing uniform buffer data..");
-        let uniform_buffer = display.device.create_buffer(&BufferDescriptor {
-            label: Some("Camera uniform buffer"),
-            size: size_of::<crate::CameraUniform>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let uniform = crate::CameraUniform::new(display.size.width, display.size.height);
-        display.queue.write_buffer(&uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
-
+        let camera = camera::Camera::new(&display.device, &display.queue, display.size);
         let uniform_bind_group_layout =
             display.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Uniform bind group layout"),
+                label: Some("Camera uniform bind group layout"),
                 entries: &[BindGroupLayoutEntry {
                     binding: 0,
                     visibility: ShaderStages::FRAGMENT | ShaderStages::VERTEX,
                     ty: BindingType::Buffer {
                         ty: BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: BufferSize::new(size_of::<crate::CameraUniform>() as u64),
+                        min_binding_size: BufferSize::new(size_of::<uniforms::Camera>() as u64),
                     },
                     count: None,
                 }],
             });
 
         let uniform_bind_group = display.device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Camera Bind Group"),
+            label: Some("Camera uniform Bind Group"),
             layout: &uniform_bind_group_layout,
-            entries: &[BindGroupEntry { binding: 0, resource: uniform_buffer.as_entire_binding() }],
+            entries: &[BindGroupEntry { binding: 0, resource: camera.buffer() }],
         });
-
-        // let mut flags = ShaderFlags::VALIDATION;
-        // if display.backend == Backends::METAL | Backends::VULKAN {
-        //     flags |= ShaderFlags::EXPERIMENTAL_TRANSLATION;
-        // }
 
         let now = std::time::Instant::now();
         let (vert_module, frag_module) = tokio::try_join!(
@@ -268,7 +257,7 @@ impl Window {
                 entry_point: "main",
                 // TODO: add objects to the world
                 buffers: &[VertexBufferLayout {
-                    array_stride: size_of::<crate::Vertex>() as BufferAddress,
+                    array_stride: size_of::<uniforms::Vertex>() as BufferAddress,
                     step_mode: VertexStepMode::Vertex,
                     attributes: &vertex_attr_array![0 => Float32x3, 1 => Float32x2],
                 }],
@@ -304,13 +293,13 @@ impl Window {
 
         Self {
             display,
+            camera,
             surfaces: vec![surface],
             bind_groups: vec![
                 BindGroups::new(texture_bind_group, texture_bind_group_layout),
                 BindGroups::new(uniform_bind_group, uniform_bind_group_layout),
             ],
             pipelines: Pipelines::new_as_vec(pipeline, pipeline_layout),
-            uniform_buffers: vec![uniform_buffer],
             vertex_buffers: vec![vertex_buffer],
             index_buffers: vec![index_buffer],
             index_count: indices.len(),
@@ -318,7 +307,7 @@ impl Window {
     }
 
     pub fn redraw(&mut self) {
-        let frame = self.surfaces[0].handle.get_current_frame().unwrap().output;
+        let frame = self.surfaces[0].handle.get_current_texture().unwrap();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
@@ -345,9 +334,14 @@ impl Window {
         render_pass.set_vertex_buffer(0, self.vertex_buffers[0].slice(..));
         render_pass.set_index_buffer(self.index_buffers[0].slice(..), IndexFormat::Uint16);
         render_pass.draw_indexed(0..self.index_count as u32, 0, 0..1);
-        drop(render_pass); // Required because render_pass and queue takes a &T.
+
+        // Required because render_pass and queue takes a &T.
+        drop(render_pass);
 
         self.display.queue.submit(Some(encoder.finish()));
+
+        // Schedule texture to be renderer on surface.
+        frame.present();
     }
 
     pub fn get_event_loop(&mut self) -> EventLoop<()> {

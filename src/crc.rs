@@ -412,7 +412,8 @@ mod test {
     #[tokio::test]
     async fn crc32_hasher() {
         let mut rng = thread_rng();
-        let (mut base_hasher, mut impl_hasher) = (crc32fast::Hasher::new(), super::Hasher::default());
+        let (mut base_hasher, mut impl_hasher) =
+            (crc32fast::Hasher::new(), super::Hasher::default());
 
         let sample_data = [16, 32, 64, 128, 256, 512, 1024].map(|v| vec![rng.gen::<u8>(); v]);
         for sample in sample_data.iter() {

@@ -1,60 +1,51 @@
-use std::sync::Arc;
-use winit::event::{ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent};
+use crate::controls;
+use winit::event::{ElementState, Event, VirtualKeyCode, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::window::Fullscreen;
-use winit::window::Window as WindowHandle;
 
-#[derive(Debug)]
-struct State<'a> {
-    control: &'a mut ControlFlow,
-    modifier: Option<ModifiersState>,
-    code: VirtualKeyCode,
-}
-
-impl<'a> State<'a> {
-    pub fn handle_keyboard(&mut self, window: Arc<WindowHandle>) {
-        match self.code {
-            VirtualKeyCode::Escape => {
-                *self.control = ControlFlow::Exit;
-            }
-            VirtualKeyCode::F11 => {
-                if window.fullscreen().is_some() {
-                    window.set_fullscreen(None);
-                } else {
-                    let handle = window.current_monitor();
-                    window.set_fullscreen(Some(Fullscreen::Borderless(handle)));
-                }
-            }
-            _ => (),
-        }
-    }
-}
-
-pub async fn run(mut window: crate::Window) {
+pub async fn run(mut window: crate::window::Window) {
     let event_loop = window.get_event_loop();
 
-    event_loop.run(move |event, _, ref mut control| {
-        let window_handle = window.get_window_handle();
-        let mut state = State { control, modifier: None, code: VirtualKeyCode::F24 };
+    // YEN as a default key should not be the case.
+    let mut keyboard = controls::Keybind::new(VirtualKeyCode::Yen);
 
-        *state.control = ControlFlow::Poll;
+    event_loop.run(move |event, _, control| {
+        let window_handle = window.get_window_handle();
+        let controls = controls::Inputs::default();
 
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
                     log::warn!("Close request was send..");
-                    *state.control = ControlFlow::Exit;
+                    *control = ControlFlow::Exit;
                 }
-                WindowEvent::ModifiersChanged(m) => state.modifier = Some(m),
+                WindowEvent::ModifiersChanged(modi) => {
+                    keyboard.modifier &= modi;
+                }
                 WindowEvent::KeyboardInput { input, .. } => {
+                    keyboard.key = input.virtual_keycode.unwrap();
+
                     if input.state == ElementState::Pressed {
-                        state.code = input.virtual_keycode.unwrap();
-                        state.handle_keyboard(window.get_window_handle());
+                        if controls.matching_action(controls::Actions::Maximize, keyboard) {
+                            let window = window.get_window_handle();
+                            if window.fullscreen().is_some() {
+                                window.set_fullscreen(None);
+                            } else {
+                                let handle = window.current_monitor();
+                                window.set_fullscreen(Some(Fullscreen::Borderless(handle)));
+                            }
+                        }
+
+                        if controls.matching_action(controls::Actions::CloseRequest, keyboard) {
+                            *control = ControlFlow::Exit;
+                        }
                     }
                 }
                 WindowEvent::Resized(size) => {
                     let device = &window.display.device;
-                    let max = crate::MIN_REAL_SIZE;
+                    let max = crate::window::MIN_REAL_SIZE;
+
+                    window.camera.resize(size);
 
                     window.surfaces.iter_mut().for_each(|surface| {
                         surface.config.width = size.width.max(max.width);
@@ -64,7 +55,10 @@ pub async fn run(mut window: crate::Window) {
                 }
                 _ => (),
             },
-            Event::RedrawRequested(_) => window.redraw(),
+            Event::RedrawRequested(_) => {
+                window.redraw();
+                window.camera.update();
+            }
             Event::MainEventsCleared => {
                 window_handle.request_redraw();
             }

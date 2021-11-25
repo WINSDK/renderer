@@ -10,18 +10,18 @@ use std::arch::x86 as intrinsics;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64 as intrinsics;
 
+mod camera;
+mod controls;
 mod crc;
-pub use crc::*;
 mod events;
-mod uniforms;
-pub use uniforms::*;
-mod window;
-pub use window::*;
-mod texture;
-pub use texture::*;
-mod util;
-pub use util::*;
+mod math;
 mod png;
+mod texture;
+mod uniforms;
+mod util;
+mod window;
+
+pub use util::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,11 +1,11 @@
 use crate::crc::crc32;
 use png::{BitDepth, ColorType};
+use std::mem::{align_of, size_of, size_of_val, ManuallyDrop};
 use std::{
     borrow::Cow,
     fmt::Debug,
     fs,
     io::{self, ErrorKind, Read},
-    mem::{size_of, size_of_val, ManuallyDrop},
     path::{Path, PathBuf},
 };
 use wgpu::{Device, ShaderModule, ShaderSource, ShaderStages};
@@ -136,8 +136,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     };
 
     let module_info = validator.validate(&module).unwrap();
-    let mut binary =
-        ManuallyDrop::new(spv::write_vec(&module, &module_info, &SpvOptions::default()).unwrap());
+    let mut binary = ManuallyDrop::new(
+        spv::write_vec(&module, &module_info, &SpvOptions::default(), None).unwrap(),
+    );
 
     // SAFETY: use this before create_shader_module as the destructor can be run on the original
     // vec resulting in the vec pointing to deallocated memory
@@ -193,4 +194,25 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         label: None,
         source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
     }))
+}
+
+#[inline]
+pub fn cast_bytes<'bytes, T>(p: &'bytes T) -> &'bytes [u8] {
+    unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, std::mem::size_of::<T>()) }
+}
+
+#[inline]
+pub fn cast_slice<A, B>(slice: &[A]) -> &[B] {
+    if align_of::<B>() > align_of::<A>() && (slice.as_ptr() as usize) % align_of::<B>() != 0 {
+        panic!("Unaligned cast");
+    } else if size_of::<B>() == size_of::<A>() {
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const B, slice.len()) }
+    } else if size_of::<A>() == 0 || size_of::<B>() == 0 {
+        panic!("mismatched size");
+    } else if size_of_val(slice) % size_of::<B>() == 0 {
+        let new_len = size_of_val(slice) / size_of::<B>();
+        unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const B, new_len) }
+    } else {
+        panic!("unknown cast fault");
+    }
 }
