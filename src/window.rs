@@ -71,7 +71,7 @@ impl Display {
         let instance = Instance::new(backend);
 
         let size = window.inner_size();
-        let surface = unsafe { instance.create_surface(window.clone().as_ref()) };
+        let surface = unsafe { instance.create_surface(&*window.clone()) };
         let adapter = instance
             .enumerate_adapters(backend)
             .find(|adapter| surface.get_preferred_format(adapter).is_some())
@@ -109,12 +109,6 @@ pub struct Window {
 impl Window {
     pub async fn new() -> Self {
         let display = Display::new().await.unwrap();
-        let mut present_mode = PresentMode::Mailbox;
-
-        if display.backend == Backends::METAL {
-            // TEMP: macos doesn't seem to support MailBox
-            present_mode = PresentMode::Fifo;
-        }
 
         let (vertices, indices) = uniforms::create_vertices();
         log::info!("Reading texture and writting to queue..");
@@ -122,12 +116,13 @@ impl Window {
         let surface = {
             let window_size = display.window.inner_size();
             let surface = unsafe { display.instance.create_surface(display.window.as_ref()) };
+
             let format =
                 surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
             let config = SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
-                present_mode,
+                present_mode: PresentMode::Mailbox,
                 width: window_size.width,
                 height: window_size.height,
             };
@@ -161,7 +156,7 @@ impl Window {
                     BindGroupLayoutEntry {
                         binding: 1,
                         visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Sampler { comparison: false, filtering: true },
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -289,6 +284,7 @@ impl Window {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            multiview: None,
         });
 
         Self {
