@@ -1,4 +1,5 @@
 use winit::event::{KeyboardInput, ModifiersState, VirtualKeyCode};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keybind {
@@ -31,41 +32,45 @@ pub enum Actions {
 pub struct Inputs {
     speed: f32,
     sensitivity: f32,
-    pub keymap: Vec<(Actions, Keybind)>,
+    pub keymap: HashMap<Actions, Vec<Keybind>>,
 }
 
 impl Default for Inputs {
     fn default() -> Self {
-        let mut keymap: Vec<(Actions, Keybind)> = Vec::new();
+        let mut keymap = Inputs { speed: 100.0, sensitivity: 1.3, keymap: HashMap::new() };
 
-        keymap.push((
+        keymap.insert(
             Actions::Maximize,
             Keybind::new_with_modifier(
                 VirtualKeyCode::F,
                 ModifiersState::CTRL & ModifiersState::LOGO,
             ),
-        ));
+        );
 
-        keymap.push((
+        keymap.insert(
             Actions::CloseRequest,
             Keybind::new_with_modifier(VirtualKeyCode::Escape, ModifiersState::empty()),
-        ));
+        );
 
-        Self { speed: 100.0, sensitivity: 1.3, keymap }
+        keymap
     }
 }
 
 impl Inputs {
     #[allow(dead_code)]
-    pub fn new(keymap: Vec<(Actions, Keybind)>) -> Self {
+    pub fn new(keymap: HashMap<Actions, Vec<Keybind>>) -> Self {
         Self { speed: 100.0, sensitivity: 1.3, keymap }
     }
 
     /// Iterates through the bound keys and returns whether an action has been executed.
     pub fn matching_action(&self, action: Actions, input: Keybind) -> bool {
-        for (_, entry) in self.keymap.iter().filter(|(act, _)| act == &action) {
-            if *entry == input {
-                return true;
+        self.keymap.get(&action);
+
+        if let Some(keybinds) = self.keymap.get(&action) {
+            for keybind in keybinds {
+                if keybind == &input {
+                    return true;
+                }
             }
         }
 
@@ -73,7 +78,11 @@ impl Inputs {
     }
 
     pub fn insert(&mut self, action: Actions, keybind: Keybind) {
-        self.keymap.push((action, keybind));
+        if let Some(keybinds) = self.keymap.get_mut(&action) {
+            keybinds.push(keybind);
+        } else {
+            self.keymap.insert(action, vec![keybind]);
+        }
     }
 
     /// Handle keyboard input
