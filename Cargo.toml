@@ -7,19 +7,19 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] }
 
-naga = { version = "0.8", features = ["glsl-in", "spv-out"] }
+naga = { version = "0.9", features = ["glsl-in", "spv-out"] }
 shaderc = { version = "0.7", optional = true }
 
 env_logger = "0.8"
-winit = "0.26"
+winit = { version = "0.26", default_features = false, features = ["x11"] }
 wgpu = { version = "0.13", features = ["spirv"] }
 log = "0.4"
 png = "0.16"
 
 async-compression = { version = "0.3", features = ["tokio", "zlib"] }
-futures = { version = "0.3", features = ["async-await"] }
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 
 [dev-dependencies]
 crc32fast = "1.2"

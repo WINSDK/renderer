@@ -223,7 +223,7 @@ impl Window {
         });
 
         let now = std::time::Instant::now();
-        let (vert_module, frag_module) = tokio::try_join!(
+        let (vert_module, frag_module) = futures::try_join!(
             crate::generate_vulkan_shader_module(
                 "./shaders/cam.glsl",
                 ShaderStages::VERTEX,

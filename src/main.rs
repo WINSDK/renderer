@@ -23,15 +23,16 @@ mod window;
 
 pub use util::*;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(debug_assertions) {
         std::env::set_var("RUST_LOG", "info, gfx_backend_metal=warn");
     }
 
     env_logger::init();
-    let window = window::Window::new().await;
-    events::run(window).await;
+    tokio::runtime::Runtime::new()?.block_on(async {
+        let window = window::Window::new().await;
+        events::run(window).await;
 
-    Ok(())
+        Ok(())
+    })
 }
