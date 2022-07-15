@@ -392,7 +392,7 @@ mod test {
             output
         };
 
-        let output = from_utf8(&output.stdout).unwrap();
+        let output = std::str::from_utf8(&output.stdout).unwrap();
         let info: Vec<&str> = output.split_ascii_whitespace().collect();
         let info: Vec<&str> = info.iter().map(|s| s.trim_end_matches(',')).collect();
 

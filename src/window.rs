@@ -71,7 +71,6 @@ impl Display {
         let instance = Instance::new(backend);
 
         let size = window.inner_size();
-        let surface = unsafe { instance.create_surface(&*Arc::clone(&window)) };
         let surface = unsafe { instance.create_surface(&*window.clone()) };
         let adapter = instance
             .enumerate_adapters(backend)
@@ -123,9 +122,6 @@ impl Window {
                 .copied()
                 .unwrap_or(TextureFormat::Bgra8Unorm);
 
-
-            let format =
-                surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
             let config = SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -292,7 +288,6 @@ impl Window {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
         });
 
         Self {
