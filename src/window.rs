@@ -52,7 +52,7 @@ pub struct Display {
 impl Display {
     async fn new() -> Result<Self, wgpu::RequestDeviceError> {
         let event_loop = EventLoop::new();
-        let window = {
+        let window: Arc<WindowHandle> = {
             #[cfg(target_os = "linux")]
             let icon = crate::read_png("./res/iconx64.png").await.unwrap();
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -71,10 +71,10 @@ impl Display {
         let instance = Instance::new(backend);
 
         let size = window.inner_size();
-        let surface = unsafe { instance.create_surface(window.clone().as_ref()) };
+        let surface = unsafe { instance.create_surface(&*Arc::clone(&window)) };
         let adapter = instance
             .enumerate_adapters(backend)
-            .find(|adapter| surface.get_preferred_format(adapter).is_some())
+            .find(|adapter| !surface.get_supported_formats(adapter).is_empty())
             .ok_or(wgpu::RequestDeviceError)?;
 
         let trace_dir = std::env::var("WGPU_TRACE");
@@ -122,8 +122,12 @@ impl Window {
         let surface = {
             let window_size = display.window.inner_size();
             let surface = unsafe { display.instance.create_surface(display.window.as_ref()) };
-            let format =
-                surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
+            let format = surface
+                .get_supported_formats(&display.adapter)
+                .first()
+                .copied()
+                .unwrap_or(TextureFormat::Bgra8Unorm);
+
             let config = SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -161,7 +165,7 @@ impl Window {
                     BindGroupLayoutEntry {
                         binding: 1,
                         visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Sampler { comparison: false, filtering: true },
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -252,6 +256,7 @@ impl Window {
         let pipeline = display.device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Primary pipeline"),
             layout: Some(&pipeline_layout),
+            multiview: None,
             vertex: VertexState {
                 module: &vert_module,
                 entry_point: "main",
@@ -265,14 +270,14 @@ impl Window {
             fragment: Some(wgpu::FragmentState {
                 module: &frag_module,
                 entry_point: "main",
-                targets: &[wgpu::ColorTargetState {
+                targets: &[Some(wgpu::ColorTargetState {
                     format: surface.format,
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent::REPLACE,
                         alpha: wgpu::BlendComponent::REPLACE,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
-                }],
+                })],
             }),
             // How the triangles will be rasterized
             primitive: PrimitiveState {
@@ -317,14 +322,14 @@ impl Window {
 
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: None,
-            color_attachments: &[RenderPassColorAttachment {
+            color_attachments: &[Some(RenderPassColorAttachment {
                 view: &view,
                 resolve_target: None,
                 ops: Operations {
                     load: LoadOp::Clear(Color { r: 0.1, g: 0.5, b: 0.8, a: 1.0 }),
                     store: true,
                 },
-            }],
+            })],
             depth_stencil_attachment: None,
         });
 

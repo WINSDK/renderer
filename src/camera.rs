@@ -1,21 +1,21 @@
-use std::f32::consts::FRAC_PI_2;
+use std::f64::consts::FRAC_PI_2;
 use winit::dpi::PhysicalSize;
 
-use crate::math::Radians;
+use crate::math::{self, Point3, Radians};
 use crate::uniforms;
 
 #[derive(Debug)]
 pub struct Camera {
     pub uniform: uniforms::Camera,
     uniform_buffer: wgpu::Buffer,
-    position: na::Point3<f32>,
-    yaw: Radians<f32>,
-    pitch: Radians<f32>,
-    roll: Radians<f32>,
-    aspect_ratio: f32,
-    fov: Radians<f32>,
-    near: f32,
-    far: f32,
+    position: Point3,
+    yaw: Radians,
+    pitch: Radians,
+    roll: Radians,
+    aspect_ratio: f64,
+    fov: Radians,
+    near: f64,
+    far: f64,
 }
 
 impl Camera {
@@ -31,14 +31,14 @@ impl Camera {
         let mut this = Self {
             uniform: unsafe { std::mem::zeroed() },
             uniform_buffer,
-            position: na::Point3::new(0.0, 0.0, 0.0),
-            pitch: Radians(FRAC_PI_2),
-            aspect_ratio: size.width as f32 / size.height as f32,
-            fov: Radians(FRAC_PI_2),
+            position: Point3 { x: 1.0, y: 1.5, z: -0.9 },
+            pitch: FRAC_PI_2,
+            aspect_ratio: size.width as f64 / size.height as f64,
+            fov: FRAC_PI_2,
             near: 10.0,
             far: 1000.0,
-            roll: Radians(0.0),
-            yaw: Radians(0.0),
+            roll: 0.0,
+            yaw: 0.0,
         };
 
         this.uniform = uniforms::Camera { proj: this.view_projection(), position: this.position() };
@@ -46,8 +46,8 @@ impl Camera {
         this
     }
 
-    pub fn resize(&mut self, new_size: PhysicalSize<u32>) {
-        self.aspect_ratio = new_size.width as f32 / new_size.height as f32;
+    pub fn resize(&mut self, size: PhysicalSize<u32>) {
+        self.aspect_ratio = size.width as f64 / size.height as f64;
     }
 
     pub fn buffer(&self) -> wgpu::BindingResource {
@@ -56,7 +56,7 @@ impl Camera {
 
     pub fn update(&mut self) {
         self.uniform.position = self.position();
-        self.uniform.proj = self.projection() * self.view_projection();
+        self.uniform.proj = todo!(); // self.projection() * self.view_projection();
     }
 
     //pub fn handle_input(&mut self) {
@@ -67,26 +67,40 @@ impl Camera {
     //    self.position += right * (self.amount_right - self.amount_left) * self.speed * dt;
     //}
 
-    fn position(&self) -> na::Vector4<f32> {
-        self.position.to_homogeneous()
+    fn position(&self) -> math::Vector4 {
+        let math::Vector3 { x, y, z } = self.position;
+
+        vector![x, y, z, 1.0]
     }
 
-    fn projection(&self) -> na::Matrix4<f32> {
-        na::Matrix4::new_perspective(self.fov.0, self.aspect_ratio, self.near, self.far)
+    fn projection(&self) -> math::Matrix4<f64> {
+        let focal = 1.0 / (self.fov / 2.0).tan();
+        let x = focal / self.aspect_ratio;
+        let y = -focal;
+        let a = self.near / (self.far - self.near);
+        let b = self.far * a;
+
+        matrix![
+            x,   0.0, 0.0,  0.0,
+            0.0, y,   0.0,  0.0,
+            0.0, 0.0, a,    b,
+            0.0, 0.0, -1.0, 0.0
+        ]
     }
 
     /// Generates view matrix, used to bring world into world/camera space.
-    fn view_projection(&self) -> na::Matrix4<f32> {
-        let mut target = na::Point3::new(self.yaw.0.cos(), self.pitch.0.sin(), self.yaw.0.sin());
+    fn view_projection(&self) -> math::Matrix4<f64> {
+        let mut target = Point3 { x: self.yaw.cos(), y: self.pitch.sin(), z: self.yaw.sin() };
 
         // Normalize the vector
-        let magnitude: f32 = (target.x * target.x) + (target.y * target.y) + (target.z * target.z);
+        let magnitude = (target.x * target.x) + (target.y * target.y) + (target.z * target.z);
         let magnitude = magnitude.sqrt();
 
         target.x /= magnitude;
         target.y /= magnitude;
         target.z /= magnitude;
 
-        na::Matrix4::look_at_rh(&self.position, &target, &na::Vector3::y())
+        todo!()
+        // na::Matrix4::look_at_rh(&self.position, &target, &na::Vector3::y())
     }
 }

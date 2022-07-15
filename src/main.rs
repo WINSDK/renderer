@@ -1,4 +1,4 @@
-extern crate nalgebra as na;
+#![feature(repr_simd)]
 
 #[cfg(not(any(target_os = "windows", target_family = "unix")))]
 compile_error!("Renderer can only be build for windows, macos and linux.");
@@ -8,11 +8,12 @@ use std::arch::x86 as intrinsics;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64 as intrinsics;
 
+#[macro_use]
+mod math;
 mod camera;
 mod controls;
 mod crc;
 mod events;
-mod math;
 mod png;
 mod texture;
 mod uniforms;

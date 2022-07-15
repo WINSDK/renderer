@@ -1,58 +1,60 @@
+use crate::math;
+
 #[allow(dead_code)]
 #[rustfmt::skip]
-pub const OPENGL_TO_WGPU: na::Matrix4<f32> = na::Matrix4::new(
+pub const OPENGL_TO_WGPU: math::Matrix4<f64> = matrix![
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 0.5, 0.0,
     0.0, 0.0, 0.5, 1.0,
-);
+];
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Debug, Copy, Clone)]
 pub struct Vertex {
-    pos: na::Vector3<f32>,
-    tex: na::Vector2<f32>,
+    pos: math::Vector3,
+    tex: math::Vector2,
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
-    pub proj: na::Matrix4<f32>,
-    pub position: na::Vector4<f32>,
+    pub proj: math::Matrix4<f64>,
+    pub position: math::Vector4,
 }
 
 pub fn create_vertices() -> (Vec<Vertex>, Vec<u16>) {
     #[rustfmt::skip] let vertex_data = [
         // top (0, 0, 1)
-        Vertex { pos: na::Vector3::new(-1.0, -1.0, 1.0), tex: na::Vector2::new(0.0, 0.0) },
-        Vertex { pos: na::Vector3::new(1.0, -1.0, 1.0), tex: na::Vector2::new(1.0, 0.0) },
-        Vertex { pos: na::Vector3::new(1.0, 1.0, 1.0), tex: na::Vector2::new(1.0, 1.0) },
-        Vertex { pos: na::Vector3::new(-1.0, 1.0, 1.0), tex: na::Vector2::new(0.0, 1.0) },
+        Vertex { pos: vector![-1.0, -1.0, 1.0], tex: vector![0.0, 0.0] },
+        Vertex { pos: vector![1.0, -1.0, 1.0], tex: vector![1.0, 0.0] },
+        Vertex { pos: vector![1.0, 1.0, 1.0], tex: vector![1.0, 1.0] },
+        Vertex { pos: vector![-1.0, 1.0, 1.0], tex: vector![0.0, 1.0] },
         // bottom (0.0, 0, -1)
-        Vertex { pos: na::Vector3::new(-1.0, 1.0, -1.0), tex: na::Vector2::new(1.0, 0.0) },
-        Vertex { pos: na::Vector3::new(1.0, 1.0, -1.0), tex: na::Vector2::new(0.0, 0.0) },
-        Vertex { pos: na::Vector3::new(1.0, -1.0, -1.0), tex: na::Vector2::new(0.0, 1.0) },
-        Vertex { pos: na::Vector3::new(-1.0, -1.0, -1.0), tex: na::Vector2::new(1.0, 1.0) },
+        Vertex { pos: vector![-1.0, 1.0, -1.0], tex: vector![1.0, 0.0] },
+        Vertex { pos: vector![1.0, 1.0, -1.0], tex: vector![0.0, 0.0] },
+        Vertex { pos: vector![1.0, -1.0, -1.0], tex: vector![0.0, 1.0] },
+        Vertex { pos: vector![-1.0, -1.0, -1.0], tex: vector![1.0, 1.0] },
         // right (1.0, 0, 0)
-        Vertex { pos: na::Vector3::new(1.0, -1.0, -1.0), tex: na::Vector2::new(0.0, 0.0) },
-        Vertex { pos: na::Vector3::new(1.0, 1.0, -1.0), tex: na::Vector2::new(1.0, 0.0) },
-        Vertex { pos: na::Vector3::new(1.0, 1.0, 1.0), tex: na::Vector2::new(1.0, 1.0) },
-        Vertex { pos: na::Vector3::new(1.0, -1.0, 1.0), tex: na::Vector2::new(0.0, 1.0) },
+        Vertex { pos: vector![1.0, -1.0, -1.0], tex: vector![0.0, 0.0] },
+        Vertex { pos: vector![1.0, 1.0, -1.0], tex: vector![1.0, 0.0] },
+        Vertex { pos: vector![1.0, 1.0, 1.0], tex: vector![1.0, 1.0] },
+        Vertex { pos: vector![1.0, -1.0, 1.0], tex: vector![0.0, 1.0] },
         // left (-1.0, 0, 0)
-        Vertex { pos: na::Vector3::new(-1.0, -1.0, 1.0), tex: na::Vector2::new(1.0, 0.0) },
-        Vertex { pos: na::Vector3::new(-1.0, 1.0, 1.0), tex: na::Vector2::new(0.0, 0.0) },
-        Vertex { pos: na::Vector3::new(-1.0, 1.0, -1.0), tex: na::Vector2::new(0.0, 1.0) },
-        Vertex { pos: na::Vector3::new(-1.0, -1.0, -1.0), tex: na::Vector2::new(1.0, 1.0) },
+        Vertex { pos: vector![-1.0, -1.0, 1.0], tex: vector![1.0, 0.0] },
+        Vertex { pos: vector![-1.0, 1.0, 1.0], tex: vector![0.0, 0.0] },
+        Vertex { pos: vector![-1.0, 1.0, -1.0], tex: vector![0.0, 1.0] },
+        Vertex { pos: vector![-1.0, -1.0, -1.0], tex: vector![1.0, 1.0] },
         // front (0.0, 1, 0)
-        Vertex { pos: na::Vector3::new(1.0, 1.0, -1.0), tex: na::Vector2::new(1.0, 0.0) },
-        Vertex { pos: na::Vector3::new(-1.0, 1.0, -1.0), tex: na::Vector2::new(0.0, 0.0) },
-        Vertex { pos: na::Vector3::new(-1.0, 1.0, 1.0), tex: na::Vector2::new(0.0, 1.0) },
-        Vertex { pos: na::Vector3::new(1.0, 1.0, 1.0), tex: na::Vector2::new(1.0, 1.0) },
+        Vertex { pos: vector![1.0, 1.0, -1.0], tex: vector![1.0, 0.0] },
+        Vertex { pos: vector![-1.0, 1.0, -1.0], tex: vector![0.0, 0.0] },
+        Vertex { pos: vector![-1.0, 1.0, 1.0], tex: vector![0.0, 1.0] },
+        Vertex { pos: vector![1.0, 1.0, 1.0], tex: vector![1.0, 1.0] },
         // back (0.0, -1, 0)
-        Vertex { pos: na::Vector3::new(1.0, -1.0, 1.0), tex: na::Vector2::new(0.0, 0.0) },
-        Vertex { pos: na::Vector3::new(-1.0, -1.0, 1.0), tex: na::Vector2::new(1.0, 0.0) },
-        Vertex { pos: na::Vector3::new(-1.0, -1.0, -1.0), tex: na::Vector2::new(1.0, 1.0) },
-        Vertex { pos: na::Vector3::new(1.0, -1.0, -1.0), tex: na::Vector2::new(0.0, 1.0) },
+        Vertex { pos: vector![1.0, -1.0, 1.0], tex: vector![0.0, 0.0] },
+        Vertex { pos: vector![-1.0, -1.0, 1.0], tex: vector![1.0, 0.0] },
+        Vertex { pos: vector![-1.0, -1.0, -1.0], tex: vector![1.0, 1.0] },
+        Vertex { pos: vector![1.0, -1.0, -1.0], tex: vector![0.0, 1.0] },
     ];
 
     let index_data: &[u16] = &[

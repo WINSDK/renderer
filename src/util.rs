@@ -84,15 +84,13 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
 
     // cached shader matches shader source.
     if hash == u32::from_le_bytes(buf) {
-        use std::convert::TryInto;
-
         let shader: Vec<u32> = shader[4..] // ignoring the 4 checksum bytes
             .chunks(4)
             .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
             .collect();
 
         log::info!("Reading cached shader from: {:?}", path);
-        Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: ShaderSource::SpirV(Cow::Borrowed(shader.as_slice())),
         }))
@@ -158,7 +156,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
 
     fs::write(create_cache_path(path), file)?;
 
-    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+    Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::Borrowed(&binary[..])),
     }))
@@ -190,7 +188,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
 
     fs::write(create_cache_path(path), file).await?;
 
-    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+    Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
     }))
