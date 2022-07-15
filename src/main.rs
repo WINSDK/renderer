@@ -12,6 +12,7 @@ use std::arch::x86_64 as intrinsics;
 mod math;
 mod camera;
 mod controls;
+#[allow(dead_code)]
 mod crc;
 mod events;
 mod png;

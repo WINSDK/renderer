@@ -72,6 +72,7 @@ impl Display {
 
         let size = window.inner_size();
         let surface = unsafe { instance.create_surface(&*Arc::clone(&window)) };
+        let surface = unsafe { instance.create_surface(&*window.clone()) };
         let adapter = instance
             .enumerate_adapters(backend)
             .find(|adapter| !surface.get_supported_formats(adapter).is_empty())
@@ -109,12 +110,6 @@ pub struct Window {
 impl Window {
     pub async fn new() -> Self {
         let display = Display::new().await.unwrap();
-        let mut present_mode = PresentMode::Mailbox;
-
-        if display.backend == Backends::METAL {
-            // TEMP: macos doesn't seem to support MailBox
-            present_mode = PresentMode::Fifo;
-        }
 
         let (vertices, indices) = uniforms::create_vertices();
         log::info!("Reading texture and writting to queue..");
@@ -128,10 +123,13 @@ impl Window {
                 .copied()
                 .unwrap_or(TextureFormat::Bgra8Unorm);
 
+
+            let format =
+                surface.get_preferred_format(&display.adapter).unwrap_or(TextureFormat::Bgra8Unorm);
             let config = SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
-                present_mode,
+                present_mode: PresentMode::Mailbox,
                 width: window_size.width,
                 height: window_size.height,
             };
@@ -294,6 +292,7 @@ impl Window {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
+            multiview: None,
         });
 
         Self {

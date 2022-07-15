@@ -1,14 +1,21 @@
-use crate::crc::crc32;
 use png::{BitDepth, ColorType};
-use std::mem::{align_of, size_of, size_of_val, ManuallyDrop};
-use std::{
-    borrow::Cow,
-    fmt::Debug,
-    fs,
-    io::{self, ErrorKind, Read},
-    path::{Path, PathBuf},
-};
+use std::borrow::Cow;
+use std::fmt::Debug;
+use std::fs;
+use std::io::{self, ErrorKind, Read, Write};
+use std::mem::{align_of, size_of, size_of_val};
+use std::path::{Path, PathBuf};
 use wgpu::{Device, ShaderModule, ShaderSource, ShaderStages};
+
+#[macro_export]
+macro_rules! consume {
+    ($reader:expr, $ty:ty) => {{
+        use std::io::Read;
+
+        let mut tmp = [0u8; std::mem::size_of::<$ty>()];
+        unsafe { $reader.read_exact(&mut tmp).map(|_| std::mem::transmute::<_, $ty>(tmp)) }
+    }};
+}
 
 pub struct Png {
     pub data: Vec<u8>,
@@ -49,16 +56,12 @@ pub async fn generate_vulkan_shader_module<P: AsRef<Path> + Debug>(
     stage: ShaderStages,
     device: &Device,
 ) -> io::Result<ShaderModule> {
-    log::info!("Reading shader from: {:?}", path);
-    let cache_path = create_cache_path(&path);
-
-    match shader_checksum(&cache_path, device).await {
+    match shader_checksum(&path, device) {
         Err(_) => compile_shader(path, stage, device).await,
         Ok(shader) => Ok(shader),
     }
 }
 
-#[inline]
 fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
     let cache_path = path.as_ref().with_extension("spv");
     let cache_path = cache_path.file_name().unwrap();
@@ -70,17 +73,18 @@ fn create_cache_path<P: AsRef<Path>>(path: P) -> PathBuf {
 }
 
 /// checks if shader is already cached, if so returns a ShaderModule
-async fn shader_checksum<P: AsRef<Path> + Debug>(
-    path: P,
-    device: &Device,
-) -> io::Result<ShaderModule> {
-    let shader = fs::read(&path)?;
-    let hash = crc32(&shader[4..]).await;
+fn shader_checksum<P: AsRef<Path> + Debug>(path: P, device: &Device) -> io::Result<ShaderModule> {
+    let src_file = fs::File::open(&path)?;
+    let mut cache_file = fs::File::open(create_cache_path(&path))?;
 
-    let mut handle = fs::File::open(&path)?;
-    let mut buf = [0u8; 4];
+    let cache_stamp = consume!(cache_file, std::time::SystemTime)?;
 
-    handle.read_exact(&mut buf)?;
+    // Check if the src_file's modified date equals the modified date stored in the cache file,
+    // this ensures that if the source file get's modified, the cache file must be outdated.
+    if src_file.metadata()?.modified()? == cache_stamp {
+        let mut shader: Vec<u8> = Vec::new();
+
+        cache_file.read_to_end(&mut shader)?;
 
     // cached shader matches shader source.
     if hash == u32::from_le_bytes(buf) {
@@ -91,12 +95,27 @@ async fn shader_checksum<P: AsRef<Path> + Debug>(
 
         log::info!("Reading cached shader from: {:?}", path);
         Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader: Vec<u32> = {
+            let ptr = shader.as_mut_ptr() as *mut u32;
+            let len = shader.len() / 4;
+            let capacity = shader.capacity() / 4;
+
+            let new_vec = unsafe { Vec::from_raw_parts(ptr, len, capacity) };
+            std::mem::forget(shader);
+            new_vec
+        };
+
+        log::info!("Reading cached shader from: {:?}", path);
+        let res =  Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
             label: None,
             source: ShaderSource::SpirV(Cow::Borrowed(shader.as_slice())),
-        }))
-    } else {
-        Err(io::ErrorKind::NotFound.into())
+        }));
+
+        return res;
     }
+
+
+    Err(io::ErrorKind::InvalidData.into())
 }
 
 #[cfg(not(feature = "shaderc"))]
@@ -111,6 +130,9 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         valid::{Capabilities, ValidationFlags, Validator},
     };
 
+    let mut src_file = fs::File::open(&path)?;
+    let mut cache_file = fs::File::create(create_cache_path(&path))?;
+
     let stage = match stage {
         ShaderStages::COMPUTE => naga::ShaderStage::Compute,
         ShaderStages::VERTEX => naga::ShaderStage::Vertex,
@@ -119,7 +141,11 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     };
 
     let module = {
-        let src = fs::read_to_string(&path)?;
+        log::info!("Reading shader from: {:?}", path);
+
+        let mut src = String::new();
+        src_file.read_to_string(&mut src)?;
+
         let mut parser = Parser::default();
         let module = parser.parse(&GlslOptions::from(stage), &src[..]).unwrap();
 
@@ -134,27 +160,12 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     };
 
     let module_info = validator.validate(&module).unwrap();
-    let mut binary = ManuallyDrop::new(
-        spv::write_vec(&module, &module_info, &SpvOptions::default(), None).unwrap(),
-    );
+    let binary = spv::write_vec(&module, &module_info, &SpvOptions::default(), None).unwrap();
 
-    // SAFETY: use this before create_shader_module as the destructor can be run on the original
-    // vec resulting in the vec pointing to deallocated memory
-    let binary_u8 = unsafe {
-        let width = size_of::<u32>();
-        let len = binary.len() * width;
-        let capacity = binary.capacity() * width;
-        let ptr = binary.as_mut_ptr();
+    let date_modified = src_file.metadata()?.modified()?;
 
-        Vec::from_raw_parts(ptr as *mut u8, len, capacity)
-    };
-
-    let hash = crc32(&binary_u8[..]).await;
-    let mut file = Vec::with_capacity(binary_u8.len() + size_of_val(&hash));
-    file.extend(u32::to_le_bytes(hash));
-    file.extend_from_slice(&binary_u8[..]);
-
-    fs::write(create_cache_path(path), file)?;
+    cache_file.write_all(cast_bytes(&date_modified))?;
+    cache_file.write_all(cast_slice(binary.as_slice()))?;
 
     Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
@@ -197,6 +208,8 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
 #[inline]
 pub fn cast_bytes<T>(p: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, std::mem::size_of::<T>()) }
+pub fn cast_bytes<'bytes, T>(p: &'bytes T) -> &'bytes [u8] {
+    unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, size_of::<T>()) }
 }
 
 #[inline]
