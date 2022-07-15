@@ -1,17 +1,41 @@
 #![allow(dead_code)]
 
-use std::borrow::Cow;
-use std::convert::TryInto;
-use std::fmt;
 use std::path::Path;
-use std::str::{from_utf8, from_utf8_unchecked};
+use std::str::from_utf8;
 
 use async_compression::tokio::write::ZlibDecoder;
 use futures::stream::{self, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 use wgpu::TextureFormat;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
+pub enum Error {
+    /// Invalid signature in header
+    InvalidSignature,
+
+    /// only deflate/inflate is in the official standard
+    InvalidCompression,
+
+    /// Invalid iCCP profile name
+    InvalidICCP,
+
+    /// Invalid color type for a given palette
+    InvalidColorType,
+
+    /// Some header or data combination is found to be impossible
+    CorruptedFile,
+
+    /// Support not yet added
+    Unimplimented,
+
+    /// Support not planned
+    Unsupported,
+
+    /// Generic IO bound error
+    IO(std::io::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Png {
     pub data: Vec<u8>,
     pub width: u32,
@@ -19,28 +43,25 @@ pub struct Png {
     pub format: Format,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Format {
     pub texture: TextureFormat,
     channel_width: usize,
+
+    has_iccp_profile: bool,
+
     // iCCP profile can only be 79 characters
-    iccp_profile: Option<StackStr<79>>,
+    iccp_profile: [u8; 79],
 }
 
-#[derive(Debug)]
-pub enum Error {
-    InvalidSignature,
-    CorruptedFile,
-    Unimplimented(Cow<'static, str>),
-    Unsupported(Cow<'static, str>),
-    IO(std::io::Error),
-    Other(Cow<'static, str>),
-}
+impl Format {
+    fn iccp_profile(&self) -> Option<&str> {
+        if self.has_iccp_profile {
+            return from_utf8(&self.iccp_profile).ok();
+        }
 
-#[derive(Clone, Copy, PartialEq)]
-struct StackStr<const N: usize> {
-    data: [u8; N],
-    len: usize,
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -54,40 +75,13 @@ enum ColorType {
     AlphaTruecolor = 6,
 }
 
-impl<const N: usize> StackStr<N> {
-    /// panics when len > N
-    pub fn new(val: &str) -> Self {
-        let len = val.len();
-        assert!(len > N, "str: {} has a len of {} which is more than the size of {}", val, len, N);
-
-        let data = unsafe {
-            let mut space = std::mem::MaybeUninit::<[u8; N]>::uninit();
-            std::ptr::copy_nonoverlapping(val.as_ptr(), space.as_mut_ptr() as *mut u8, len);
-            space.assume_init()
-        };
-
-        Self { data, len }
-    }
-
-    pub fn get(&self) -> &str {
-        unsafe { from_utf8_unchecked(&self.data) }
-    }
-}
-
-impl<const N: usize> fmt::Debug for StackStr<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.get())?;
-        f.write_str("\n")
-    }
-}
-
 impl ColorType {
     fn new(val: u8) -> Result<Self, Error> {
         // section 3.1.12
         if [0, 2, 3, 4, 6].contains(&val) {
             Ok(unsafe { std::mem::transmute(val) })
         } else {
-            Error::invalid_signature()
+            Err(Error::InvalidSignature)
         }
     }
 }
@@ -99,7 +93,7 @@ impl Png {
     pub async fn new(mut data: &mut [u8]) -> PngResult {
         // Check `magic bytes` to evaluate whether the file is a png.
         if [0x89, 0x50, 0x4E, 0x47, 0x0D, 0xA, 0x1A, 0x0A] != data[..8] {
-            return Error::invalid_signature();
+            return Err(Error::InvalidSignature);
         }
 
         data = {
@@ -115,7 +109,7 @@ impl Png {
         let mut iter = stream::iter(chunks);
         let (ihdr_chunk, chunk_type) = iter.next().await.unwrap();
         if chunk_type != "IHDR" {
-            return Error::invalid_signature();
+            return Err(Error::InvalidSignature);
         }
 
         // *IHDR chunk*
@@ -134,18 +128,19 @@ impl Png {
         };
 
         if comp_method != &0 {
-            // only deflate/inflate is in the official standard. so only 0
-            return Error::unsupported("Invalid compression method used in PNG");
+            return Err(Error::InvalidCompression);
         }
 
         if inter_method != &0 {
-            return Error::unimplimented("Interlaced data isn't supported yet");
+            // Interlaced data isn't supported yet
+            return Err(Error::Unimplimented);
         }
 
         // TODO: handle other filter methods
         assert_eq!(filter_method, &0u8);
 
-        let mut iccp_profile: Option<StackStr<79>> = None;
+        let mut iccp_profile = [0u8; 79];
+        let mut has_iccp_profile = false;
         let mut data: Vec<u8> = {
             // TODO: predict decoder output
             let mut decoder = ZlibDecoder::new(Vec::with_capacity(((width + 1) * height) as usize));
@@ -166,26 +161,27 @@ impl Png {
                     "IDAT" /* image data chunks */ => {
                         if let Some(palette) = palette {
                             decoder.write(&handle_palette(chunk, palette, &color_type)?
-                                .unwrap_or_else(|| chunk.to_vec())).await.or_else(Error::ioerror)?;
+                                .unwrap_or_else(|| chunk.to_vec())).await.map_err(Error::IO)?;
                         } else {
-                            decoder.write(chunk).await.or_else(Error::ioerror)?;
+                            decoder.write(chunk).await.map_err(Error::IO)?;
                         }
                     },
                     "iCCP" => {
                         // TODO: ICCP color profile decoder, THIS ISN'T REALLY NECESSARY.
                         for (idx, charac) in chunk[..80].iter().enumerate() {
                             let charac = *charac;
-                            iccp_profile = match charac {
-                                0 => return Error::other("invalid iCCP profile name"),
+                            match charac {
+                                0 => return Err(Error::InvalidICCP),
                                 161..=255 | 32..=126 => {
-                                    Some(StackStr::new(from_utf8(&chunk[..idx]).unwrap()))
+                                    iccp_profile.copy_from_slice(&chunk[..idx]);
+                                    has_iccp_profile = true;
                                 },
-                                _ => return Error::other("invalid iCCP profile name")
+                                _ => return Err(Error::InvalidICCP)
                             }
                         }
 
-                        if iccp_profile.is_none() {
-                            return Error::invalid_signature();
+                        if !has_iccp_profile {
+                            return Err(Error::InvalidSignature);
                         }
                     },
                     // [image header, [textual information], ICC Profile]
@@ -197,7 +193,7 @@ impl Png {
                 }
             }
 
-            decoder.shutdown().await.or_else(Error::ioerror)?;
+            decoder.shutdown().await.map_err(Error::IO)?;
             decoder.into_inner()
         };
 
@@ -252,7 +248,12 @@ impl Png {
             data,
             width,
             height,
-            format: Format { texture: format, iccp_profile, channel_width },
+            format: Format { 
+                texture: format, 
+                has_iccp_profile,
+                iccp_profile,
+                channel_width 
+            },
         })
     }
 
@@ -334,7 +335,7 @@ fn handle_palette(
 
     // section 11.2.3
     match color_type {
-        GrayScale | AlphaGrayScale => Error::other("Invalid color type for palette"),
+        GrayScale | AlphaGrayScale => Err(Error::InvalidColorType),
         Truecolor | AlphaTruecolor => {
             // should probably be using a sPLT
             Ok(None)
@@ -362,37 +363,6 @@ fn be_slice_to_u32(slice: &[u8]) -> u32 {
     u32::from_be_bytes(slice.try_into().unwrap())
 }
 
-macro_rules! error_fn {
-    ($name:ident, $enum:expr, $into:ty) => {
-        #[allow(dead_code)]
-        #[inline(always)]
-        pub fn $name<U, T: Into<$into>>(s: T) -> Result<U, Self> {
-            Err($enum(s.into()))
-        }
-    };
-    ($name:ident, $enum:expr) => {
-        #[allow(dead_code)]
-        #[inline(always)]
-        pub fn $name<U>() -> Result<U, Self> {
-            Err($enum)
-        }
-    };
-}
-
-impl Error {
-    error_fn!(invalid_signature, Error::InvalidSignature);
-
-    error_fn!(corrupted_file, Error::CorruptedFile);
-
-    error_fn!(unimplimented, Error::Unimplimented, Cow<'static, str>);
-
-    error_fn!(unsupported, Error::Unsupported, Cow<'static, str>);
-
-    error_fn!(ioerror, Error::IO, std::io::Error);
-
-    error_fn!(other, Error::Other, Cow<'static, str>);
-}
-
 #[cfg(test)]
 mod test {
     use std::path::Path;
@@ -404,7 +374,7 @@ mod test {
         use wgpu::TextureFormat;
 
         let path = Path::new("./test_cases/joe_biden.png");
-        let png = Png::from_path(path).await.unwrap();
+        let png = super::Png::from_path(path).await.unwrap();
 
         let output = {
             let process = Command::new("file")
@@ -422,7 +392,7 @@ mod test {
             output
         };
 
-        let output = std::str::from_utf8(&output.stdout).unwrap();
+        let output = from_utf8(&output.stdout).unwrap();
         let info: Vec<&str> = output.split_ascii_whitespace().collect();
         let info: Vec<&str> = info.iter().map(|s| s.trim_end_matches(',')).collect();
 
@@ -441,11 +411,11 @@ mod test {
         })
     }
 
-    // #[tokio::test]
+    #[tokio::test]
     async fn convert_to_png() {
         let path = Path::new("./test_cases/joe_biden.png");
         let external_png = crate::read_png(&path).await.unwrap();
         let internal_png = crate::png::Png::from_path(&path).await.unwrap();
-        assert_eq!(external_png.data, internal_png.data);
+        assert_eq!(external_png.data, internal_png.data, "png data doesn't match");
     }
 }
