@@ -1,5 +1,5 @@
-use winit::event::{KeyboardInput, ModifiersState, VirtualKeyCode};
 use std::collections::HashMap;
+use winit::event::{KeyboardInput, ModifiersState, VirtualKeyCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keybind {

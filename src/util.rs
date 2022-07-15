@@ -97,14 +97,13 @@ fn shader_checksum<P: AsRef<Path> + Debug>(path: P, device: &Device) -> io::Resu
         };
 
         log::info!("Reading cached shader from: {:?}", path);
-        let res =  Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let res = Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: ShaderSource::SpirV(Cow::Borrowed(shader.as_slice())),
         }));
 
         return res;
     }
-
 
     Err(io::ErrorKind::InvalidData.into())
 }
@@ -177,20 +176,23 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         _ => unreachable!(), // can't have unreachable_unchecked() in case of accidental use VERTEX_FRAGMENT
     };
 
+    let mut src_file = fs::File::open(&path)?;
+    let mut cache_file = fs::File::create(create_cache_path(&path))?;
+    let mut src = String::new();
+
+    src_file.read_to_string(&mut src)?;
+
     let mut compiler = shaderc::Compiler::new().unwrap();
-    let src = fs::read_to_string(&path).await?;
     let binary = compiler
         .compile_into_spirv(&src, stage, path.as_ref().to_str().unwrap(), "main", None)
         .unwrap();
 
-    let hash = crc32(binary.as_binary_u8()).await;
-    let mut file = Vec::with_capacity(binary.as_binary_u8().len() + size_of_val(&hash));
-    file.extend(u32::to_le_bytes(hash));
-    file.extend_from_slice(binary.as_binary_u8());
+    let date_modified = src_file.metadata()?.modified()?;
 
-    fs::write(create_cache_path(path), file).await?;
+    cache_file.write_all(cast_bytes(&date_modified))?;
+    cache_file.write_all(cast_slice(binary.as_binary_u8()))?;
 
-    Ok(device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+    Ok(device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,
         source: ShaderSource::SpirV(Cow::Borrowed(binary.as_binary())),
     }))

@@ -248,12 +248,7 @@ impl Png {
             data,
             width,
             height,
-            format: Format { 
-                texture: format, 
-                has_iccp_profile,
-                iccp_profile,
-                channel_width 
-            },
+            format: Format { texture: format, has_iccp_profile, iccp_profile, channel_width },
         })
     }
 
