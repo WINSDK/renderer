@@ -9,7 +9,7 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] }
 
-naga = { version = "0.9", features = ["glsl-in", "spv-out"] }
+naga = { version = "0.9", features = ["glsl-in", "spv-out"], optional = true }
 shaderc = { version = "0.7", optional = true }
 
 env_logger = "0.8"
@@ -24,6 +24,9 @@ futures = { version = "0.3", default-features = false, features = ["std", "async
 [dev-dependencies]
 crc32fast = "1.2"
 rand = "0.8"
+
+[features]
+default = ["naga"]
 
 [profile.dev]
 split-debuginfo = "unpacked"

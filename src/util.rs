@@ -108,7 +108,7 @@ fn shader_checksum<P: AsRef<Path> + Debug>(path: P, device: &Device) -> io::Resu
     Err(io::ErrorKind::InvalidData.into())
 }
 
-#[cfg(not(feature = "shaderc"))]
+#[cfg(all(feature = "naga", not(feature = "shaderc")))]
 async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStages,
@@ -163,7 +163,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
     }))
 }
 
-#[cfg(feature = "shaderc")]
+#[cfg(all(feature = "shaderc", not(feature = "naga")))]
 async fn compile_shader<P: AsRef<Path> + Debug>(
     path: P,
     stage: ShaderStages,
@@ -173,7 +173,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
         ShaderStages::COMPUTE => shaderc::ShaderKind::Compute,
         ShaderStages::VERTEX => shaderc::ShaderKind::Vertex,
         ShaderStages::FRAGMENT => shaderc::ShaderKind::Fragment,
-        _ => unreachable!(), // can't have unreachable_unchecked() in case of accidental use VERTEX_FRAGMENT
+        _ => unreachable!(),
     };
 
     let mut src_file = fs::File::open(&path)?;
