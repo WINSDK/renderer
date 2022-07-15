@@ -82,7 +82,7 @@ impl Display {
             .request_device(
                 &DeviceDescriptor {
                     label: Some("Primary device"),
-                    features: adapter.features(),
+                    features: wgpu::Features::empty(),
                     limits: adapter.limits(),
                 },
                 trace_dir.ok().as_ref().map(std::path::Path::new),
@@ -122,10 +122,16 @@ impl Window {
                 .copied()
                 .unwrap_or(TextureFormat::Bgra8Unorm);
 
+            let present_mode = surface
+                .get_supported_modes(&display.adapter)
+                .into_iter()
+                .find(|&m| m == wgpu::PresentMode::Mailbox)
+                .unwrap_or(wgpu::PresentMode::AutoNoVsync);
+
             let config = SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
-                present_mode: PresentMode::Mailbox,
+                present_mode,
                 width: window_size.width,
                 height: window_size.height,
             };
