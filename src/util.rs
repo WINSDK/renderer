@@ -195,7 +195,7 @@ async fn compile_shader<P: AsRef<Path> + Debug>(
 }
 
 #[inline]
-pub fn cast_bytes<'bytes, T>(p: &'bytes T) -> &'bytes [u8] {
+pub fn cast_bytes<T>(p: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, std::mem::size_of::<T>()) }
 }
 

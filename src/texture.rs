@@ -15,7 +15,8 @@ impl Texture {
         queue: &'a wgpu::Queue,
     ) -> Result<Texture, io::Error> {
         let image = crate::read_png(path).await?;
-        Ok(Self::from_png(image, device, queue).await?)
+
+        Self::from_png(image, device, queue).await
     }
 
     pub async fn from_bytes(
@@ -24,7 +25,8 @@ impl Texture {
         queue: &wgpu::Queue,
     ) -> Result<Texture, io::Error> {
         let image = crate::convert_to_png(bytes).await?;
-        Ok(Self::from_png(image, device, queue).await?)
+
+        Self::from_png(image, device, queue).await
     }
 
     /// WARNING: Png must be RGBA

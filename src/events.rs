@@ -20,7 +20,7 @@ pub async fn run(mut window: crate::window::Window) {
                     *control = ControlFlow::Exit;
                 }
                 WindowEvent::ModifiersChanged(modi) => {
-                    keyboard.modifier &= modi;
+                    keyboard.modifier ^= modi;
                 }
                 WindowEvent::KeyboardInput { input, .. } => {
                     keyboard.key = input.virtual_keycode.unwrap();
