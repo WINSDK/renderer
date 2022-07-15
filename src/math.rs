@@ -200,7 +200,12 @@ impl Mul<Self> for Matrix<f64, 16> {
             let bh = _mm256_permute2f128_pd(tby, tbh, 0x31);
 
             // Perform a dot product on the rows of `self` and `other`
-            let mut data = [0f64; 16];
+            //
+            // NOTE: data must be stored in a `matrix` as `_mm256_store_pd`
+            // requires `data` to be 32 byte aligned.
+            let mut matrix = Matrix { data: [0f64; 16], width: 4 };
+            let ptr = matrix.data.as_mut_ptr();
+
             for (idx, &src) in [ax, ay, az, ah].iter().enumerate() {
                 let xx = _mm256_mul_pd(src, bx);
                 let xy = _mm256_mul_pd(src, by);
@@ -214,10 +219,11 @@ impl Mul<Self> for Matrix<f64, 16> {
                 let blended = _mm256_blend_pd(t1, t2, 0b1100);
                 let dotproduct = _mm256_add_pd(swapped, blended);
 
-                _mm256_store_pd(data.as_mut_ptr().add(idx * 4), dotproduct);
+                _mm256_store_pd(ptr.add(idx * 4), dotproduct);
+                _mm256_store_pd(ptr.add(idx * 4), dotproduct);
             }
 
-            Matrix { data, width: 4 }
+            matrix
         }
     }
 }
