@@ -56,7 +56,7 @@ impl Camera {
 
     pub fn update(&mut self) {
         self.uniform.position = self.position();
-        self.uniform.proj = todo!(); // self.projection() * self.view_projection();
+        self.uniform.proj = self.projection() * self.view_projection();
     }
 
     //pub fn handle_input(&mut self) {
@@ -100,7 +100,6 @@ impl Camera {
         target.y /= magnitude;
         target.z /= magnitude;
 
-        todo!()
-        // na::Matrix4::look_at_rh(&self.position, &target, &na::Vector3::y())
+        math::look_at_rh(&self.position, &target, &Point3 { x: 0.0, y: 1.0, z: 0.0 })
     }
 }

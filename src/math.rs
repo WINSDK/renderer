@@ -1,7 +1,7 @@
 use crate::intrinsics::*;
 
 use std::mem::transmute;
-use std::ops::Mul;
+use std::ops::{Mul, Sub};
 
 pub type Radians = f64;
 
@@ -10,38 +10,6 @@ pub type Point3 = Vector3;
 pub type Matrix2<T> = Matrix<T, 4>;
 pub type Matrix3<T> = Matrix<T, 9>;
 pub type Matrix4<T> = Matrix<T, 16>;
-
-#[repr(simd)]
-#[derive(Debug, Clone, Copy)]
-pub struct Vector2 {
-    pub x: f64,
-    pub y: f64,
-}
-
-#[repr(simd)]
-#[derive(Debug, Clone, Copy)]
-pub struct Vector3 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-#[repr(simd)]
-#[derive(Debug, Clone, Copy)]
-pub struct Vector4 {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub h: f64,
-}
-
-// NOTE: `S` specifies the width**2
-#[repr(C, align(32))]
-#[derive(Debug, Clone, Copy)]
-pub struct Matrix<T, const S: usize> {
-    pub data: [T; S],
-    pub width: usize,
-}
 
 #[macro_export]
 macro_rules! vector {
@@ -88,6 +56,55 @@ macro_rules! matrix {
     };
 }
 
+const fn _mm_shuffle(z: u32, y: u32, x: u32, w: u32) -> i32 {
+    ((z << 6) | (y << 4) | (x << 2) | w) as i32
+}
+
+pub fn look_at_rh(eye: &Point3, center: &Point3, up: &Point3) -> Matrix4<f64> {
+    let f = (*center - *eye).normalize();
+    let s = f.cross(&up).normalize();
+    let u = s.cross(&f);
+
+    matrix![
+        s.x, u.x, -f.x, -s.dot(&eye),
+        s.y, u.y, -f.y, -u.dot(&eye),
+        s.z, u.z, -f.z,  f.dot(&eye),
+        0.0, 0.0,  0.0,  0.0,
+    ]
+}
+
+#[repr(simd)]
+#[derive(Debug, Clone, Copy)]
+pub struct Vector2 {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[repr(simd)]
+#[derive(Debug, Clone, Copy)]
+pub struct Vector3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+#[repr(simd)]
+#[derive(Debug, Clone, Copy)]
+pub struct Vector4 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub h: f64,
+}
+
+// NOTE: `S` specifies the width**2
+#[repr(C, align(32))]
+#[derive(Debug, Clone, Copy)]
+pub struct Matrix<T, const S: usize> {
+    pub data: [T; S],
+    pub width: usize,
+}
+
 impl PartialEq<Self> for Vector2 {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
@@ -109,10 +126,67 @@ impl Mul<Self> for Vector2 {
     }
 }
 
+impl Vector3 {
+    #[inline]
+    fn load_mm256(&self) -> __m256d {
+        unsafe { _mm256_load_pd(self as *const _ as *const f64) }
+    }
+
+    pub fn normalize(&self) -> Self {
+        let magnitude = (self.x * self.x) + (self.y * self.y) + (self.z * self.z);
+        let magnitude = magnitude.sqrt();
+
+        vector![self.x / magnitude, self.y / magnitude, self.z / magnitude,]
+    }
+
+    pub fn cross(&self, vect: &Vector3) -> Vector3 {
+        unsafe {
+            let a = self.load_mm256();
+            let b = vect.load_mm256();
+
+            let t0 = _mm256_shuffle_pd(a, a, _mm_shuffle(3, 0, 2, 1));
+            let t1 = _mm256_shuffle_pd(b, b, _mm_shuffle(3, 1, 0, 2));
+            let t2 = _mm256_mul_pd(t0, b);
+            let t3 = _mm256_shuffle_pd(t2, t2, _mm_shuffle(3, 0, 2, 1));
+
+            transmute(_mm256_fmsub_pd(t0, t1, t3))
+        }
+    }
+
+    pub fn dot(&self, vect: &Vector3) -> f64 {
+        unsafe {
+            let a = self.load_mm256();
+            let b = vect.load_mm256();
+
+            let ab = _mm256_mul_pd(a, b);
+
+            let ablow = _mm256_castpd256_pd128(ab);
+            let abhigh = _mm256_extractf128_pd(ab, 1);
+            let sum = _mm_add_pd(ablow, abhigh);
+
+            let swapped = _mm_shuffle_pd(sum, sum, 0b01);
+            let dotproduct = _mm_add_pd(sum, swapped);
+
+            _mm_cvtsd_f64(dotproduct)
+        }
+    }
+}
+
 impl PartialEq<Self> for Vector3 {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.x == other.x && self.y == other.y && self.z == other.z
+    }
+}
+
+impl Sub<Self> for Vector3 {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, vect: Self) -> Self::Output {
+        unsafe {
+            transmute(_mm256_sub_pd(self.load_mm256(), vect.load_mm256()))
+        }
     }
 }
 
@@ -122,10 +196,7 @@ impl Mul<Self> for Vector3 {
     #[inline]
     fn mul(self, vect: Self) -> Self::Output {
         unsafe {
-            let a = _mm256_load_pd(&self as *const Self as *const _);
-            let b = _mm256_load_pd(&vect as *const Self as *const _);
-
-            transmute(_mm256_mul_pd(a, b))
+            transmute(_mm256_mul_pd(self.load_mm256(), vect.load_mm256()))
         }
     }
 }
@@ -155,6 +226,24 @@ impl<T: PartialEq, const S: usize> PartialEq<Self> for Matrix<T, S> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
+    }
+}
+
+impl<T: Default, const S: usize> Default for Matrix<T, S> {
+    fn default() -> Self {
+        Self {
+            data: {
+                let mut data: [std::mem::MaybeUninit<T>; S] =
+                    unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+
+                for elem in &mut data[..] {
+                    elem.write(T::default());
+                }
+
+                unsafe { std::ptr::read(&data as *const _ as *const [T; S]) }
+            },
+            width: (S as f64).sqrt() as usize,
+        }
     }
 }
 
@@ -253,7 +342,6 @@ mod test {
         assert_eq!(a * b, c);
     }
 
-    #[rustfmt::skip]
     #[test]
     #[no_mangle]
     fn matrix_mul() {
