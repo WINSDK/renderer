@@ -8,6 +8,8 @@ use futures::stream::{self, StreamExt};
 use tokio::{fs, io::AsyncWriteExt};
 use wgpu::TextureFormat;
 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(Debug)]
 pub enum Error {
     /// Invalid signature in header
@@ -76,7 +78,7 @@ enum ColorType {
 }
 
 impl ColorType {
-    fn new(val: u8) -> Result<Self, Error> {
+    fn new(val: u8) -> Result<Self> {
         // section 3.1.12
         if [0, 2, 3, 4, 6].contains(&val) {
             Ok(unsafe { std::mem::transmute(val) })
@@ -86,11 +88,9 @@ impl ColorType {
     }
 }
 
-pub type PngResult = Result<Png, Error>;
-
 impl Png {
     /// WARNING: TextureFormat must match swapchain's TextureFormat
-    pub async fn new(mut data: &mut [u8]) -> PngResult {
+    pub async fn new(mut data: &mut [u8]) -> Result<Png> {
         // Check `magic bytes` to evaluate whether the file is a png.
         if [0x89, 0x50, 0x4E, 0x47, 0x0D, 0xA, 0x1A, 0x0A] != data[..8] {
             return Err(Error::InvalidSignature);
@@ -252,7 +252,7 @@ impl Png {
         })
     }
 
-    pub async fn from_path<P: AsRef<Path>>(path: P) -> PngResult {
+    pub async fn from_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut data = fs::read(path).await.map_err(Error::IO)?;
         Png::new(&mut data).await
     }
@@ -325,7 +325,7 @@ fn handle_palette(
     idat_chunk: &mut [u8],
     palette: &[u8],
     color_type: &ColorType,
-) -> Result<Option<Vec<u8>>, Error> {
+) -> Result<Option<Vec<u8>>> {
     use ColorType::*;
 
     // section 11.2.3
