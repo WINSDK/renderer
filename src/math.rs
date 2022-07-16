@@ -1,6 +1,8 @@
+#[rustfmt::skip::macros(matrix, vector)]
+
 use crate::intrinsics::*;
 
-use std::mem::transmute;
+use std::mem::{transmute, MaybeUninit};
 use std::ops::{Mul, Sub};
 
 pub type Radians = f64;
@@ -56,10 +58,7 @@ macro_rules! matrix {
     };
 }
 
-const fn _mm_shuffle(z: u32, y: u32, x: u32, w: u32) -> i32 {
-    ((z << 6) | (y << 4) | (x << 2) | w) as i32
-}
-
+#[no_mangle]
 pub fn look_at_rh(eye: &Point3, center: &Point3, up: &Point3) -> Matrix4<f64> {
     let f = (*center - *eye).normalize();
     let s = f.cross(&up).normalize();
@@ -233,8 +232,7 @@ impl<T: Default, const S: usize> Default for Matrix<T, S> {
     fn default() -> Self {
         Self {
             data: {
-                let mut data: [std::mem::MaybeUninit<T>; S] =
-                    unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+                let mut data: [MaybeUninit<T>; S] = unsafe { MaybeUninit::uninit().assume_init() };
 
                 for elem in &mut data[..] {
                     elem.write(T::default());

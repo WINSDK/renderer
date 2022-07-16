@@ -1,3 +1,5 @@
+#[rustfmt::skip::macros(matrix, vector)]
+
 use std::f64::consts::FRAC_PI_2;
 use winit::dpi::PhysicalSize;
 
@@ -31,7 +33,7 @@ impl Camera {
         let mut this = Self {
             uniform: unsafe { std::mem::zeroed() },
             uniform_buffer,
-            position: Point3 { x: 1.0, y: 1.5, z: -0.9 },
+            position: vector![1.0, 1.5, -0.9],
             pitch: FRAC_PI_2,
             aspect_ratio: size.width as f64 / size.height as f64,
             fov: FRAC_PI_2,
@@ -74,23 +76,22 @@ impl Camera {
     }
 
     fn projection(&self) -> math::Matrix4<f64> {
-        let focal = 1.0 / (self.fov / 2.0).tan();
-        let x = focal / self.aspect_ratio;
-        let y = -focal;
-        let a = self.near / (self.far - self.near);
-        let b = self.far * a;
+        let f = 1.0 / (self.fov / 2.0).tan();
+        let a = f / self.aspect_ratio;
+        let b = self.near / (self.far - self.near);
+        let c = self.far * b;
 
         matrix![
-            x,   0.0, 0.0,  0.0,
-            0.0, y,   0.0,  0.0,
-            0.0, 0.0, a,    b,
-            0.0, 0.0, -1.0, 0.0
+            a,    0.0,  0.0, 0.0,
+            0.0, -f,    0.0, 0.0,
+            0.0,  0.0,  b,   c,
+            0.0,  0.0, -1.0, 0.0
         ]
     }
 
     /// Generates view matrix, used to bring world into world/camera space.
     fn view_projection(&self) -> math::Matrix4<f64> {
-        let mut target = Point3 { x: self.yaw.cos(), y: self.pitch.sin(), z: self.yaw.sin() };
+        let mut target = vector![self.yaw.cos(), self.pitch.sin(), self.yaw.sin()];
 
         // Normalize the vector
         let magnitude = (target.x * target.x) + (target.y * target.y) + (target.z * target.z);
@@ -100,6 +101,6 @@ impl Camera {
         target.y /= magnitude;
         target.z /= magnitude;
 
-        math::look_at_rh(&self.position, &target, &Point3 { x: 0.0, y: 1.0, z: 0.0 })
+        math::look_at_rh(&self.position, &target, &vector![0.0, 1.0, 0.0])
     }
 }

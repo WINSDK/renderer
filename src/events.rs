@@ -3,14 +3,13 @@ use winit::event::{ElementState, Event, VirtualKeyCode, WindowEvent};
 use winit::event_loop::ControlFlow;
 use winit::window::Fullscreen;
 
-pub async fn run(mut window: crate::window::Window) {
-    let event_loop = window.get_event_loop();
-
-    // YEN as a default key should not be the case.
+pub async fn run(mut display: crate::window::Display) {
+    let window = display.window.take().unwrap();
     let mut keyboard = controls::Keybind::new(VirtualKeyCode::Yen);
+    let mut now = std::time::Instant::now();
+    let mut frames = 0;
 
-    event_loop.run(move |event, _, control| {
-        let window_handle = window.get_window_handle();
+    display.event_loop.take().unwrap().run(move |event, _, control| {
         let controls = controls::Inputs::default();
 
         match event {
@@ -27,7 +26,6 @@ pub async fn run(mut window: crate::window::Window) {
 
                     if input.state == ElementState::Pressed {
                         if controls.matching_action(controls::Actions::Maximize, keyboard) {
-                            let window = window.get_window_handle();
                             if window.fullscreen().is_some() {
                                 window.set_fullscreen(None);
                             } else {
@@ -42,12 +40,12 @@ pub async fn run(mut window: crate::window::Window) {
                     }
                 }
                 WindowEvent::Resized(size) => {
-                    let device = &window.display.device;
+                    let device = &display.device;
                     let max = crate::window::MIN_REAL_SIZE;
 
-                    window.camera.resize(size);
+                    display.camera.resize(size);
 
-                    window.surfaces.iter_mut().for_each(|surface| {
+                    display.surfaces.iter_mut().for_each(|surface| {
                         surface.config.width = size.width.max(max.width);
                         surface.config.height = size.height.max(max.height);
                         surface.handle.configure(device, &surface.config);
@@ -56,11 +54,20 @@ pub async fn run(mut window: crate::window::Window) {
                 _ => (),
             },
             Event::RedrawRequested(_) => {
-                window.redraw();
-                window.camera.update();
+
+                frames += 1;
+                if now.elapsed() >= std::time::Duration::from_secs(1) {
+                    log::info!("frame rate: {frames}");
+
+                    frames = 0;
+                    now = std::time::Instant::now();
+                }
+
+                display.redraw();
+                display.camera.update();
             }
             Event::MainEventsCleared => {
-                window_handle.request_redraw();
+                window.request_redraw();
             }
             _ => (),
         }

@@ -9,10 +9,16 @@ compile_error!("Must use at least one feature from `naga` or `shaderc`");
 #[cfg(all(feature = "naga", feature = "shaderc"))]
 compile_error!("Must use either feature `naga` or `shaderc`");
 
-#[cfg(target_arch = "x86")]
-use std::arch::x86 as intrinsics;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64 as intrinsics;
+mod intrinsics {
+    #[cfg(target_arch = "x86")]
+    pub use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    pub use std::arch::x86_64::*;
+
+    pub const fn _mm_shuffle(z: u32, y: u32, x: u32, w: u32) -> i32 {
+        ((z << 6) | (y << 4) | (x << 2) | w) as i32
+    }
+}
 
 #[rustfmt::skip::macros(matrix, vector)]
 #[macro_use]
@@ -44,7 +50,7 @@ fn main() {
     env_logger::init();
 
     tokio::runtime::Runtime::new().expect("Tokio runtime failed to start").block_on(async {
-        let window = window::Window::new().await;
-        events::run(window).await;
+        let display = window::Display::new().await.unwrap();
+        events::run(display).await;
     })
 }
